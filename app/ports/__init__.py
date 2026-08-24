@@ -1,0 +1,1 @@
+# Ports (interfaces) - define contracts for inbound/outbound adapters

@@ -1,0 +1,1 @@
+# Outbound adapters (Prometheus, DB, external APIs)
