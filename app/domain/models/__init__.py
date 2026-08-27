@@ -13,7 +13,7 @@ from app.domain.models.pod_metric import (
     PodMetric,
     StorageMetric,
 )
-from app.domain.models.carbon_footprint import CarbonFootprint
+from app.domain.models.carbon_footprint import CarbonFootprint, EnergyBreakdown
 from app.domain.models.recommendation import (
     Category,
     Recommendation,
@@ -25,6 +25,7 @@ __all__ = [
     "ClusterAllocatable",
     "StorageMetric",
     "CarbonFootprint",
+    "EnergyBreakdown",
     "Recommendation",
     "Category",
     "Severity",
