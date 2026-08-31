@@ -14,6 +14,7 @@ from app.domain.models.pod_metric import (
     StorageMetric,
 )
 from app.domain.models.carbon_footprint import CarbonFootprint, EnergyBreakdown
+from app.domain.models.data_quality import DataQuality, TelemetrySource
 from app.domain.models.recommendation import (
     Category,
     Recommendation,
@@ -26,6 +27,8 @@ __all__ = [
     "StorageMetric",
     "CarbonFootprint",
     "EnergyBreakdown",
+    "DataQuality",
+    "TelemetrySource",
     "Recommendation",
     "Category",
     "Severity",
