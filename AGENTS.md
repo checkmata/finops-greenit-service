@@ -16,7 +16,12 @@ Strict Hexagonal Architecture (Ports & Adapters).
 
 ## Scope for this build (1-month MVP)
 - `recommendation_engine.py` generates advice only. Do NOT implement any action/actuation logic (no HPA/VPA patching, no auto-remediation) — this is explicitly deferred.
-- No persistence layer. `prometheus_adapter.py` queries live on each request. Do not add a database or `storage_port` implementation unless asked.
+- `prometheus_adapter.py` still queries Prometheus live for "current state" endpoints — this behavior does NOT change.
+- Persistence IS now in scope, added via `storage_port.py` + `app/adapters/outbound/timescale_adapter.py`, using PostgreSQL + the TimescaleDB extension (single container, both relational and time-series data — no polyglot persistence).
+- Two tables only: `recommendations` (relational, has a status lifecycle: pending/approved/executed/dismissed) and `metric_snapshots` (TimescaleDB hypertable, one row per namespace per scheduler run, 7-day retention policy via `add_retention_policy`).
+- Writes to storage happen ONLY from `app/scheduler/snapshot_job.py`, running on a timer. Routers must NEVER write to storage directly on every request — that would duplicate rows on every Grafana refresh.
+- Local dev: TimescaleDB runs via `docker-compose.yaml` (`timescale/timescaledb:latest-pg16` image) — the exact same image later deployed to OpenShift as a StatefulSet. Do not use SQLite; it fails our Grafana-native-plugin and TTL/downsampling requirements.
+- Domain layer (`app/domain/`) must remain completely unaware storage exists — SQLAlchemy models live in `app/adapters/outbound/db/models.py`, separate from domain dataclasses, mapped by `timescale_adapter.py`.
 - Before implementing any metric, check `docs/metrics-reference.md` for the exact metric name and PromQL pattern — do not invent or assume metric names.
 
 ## Conventions
