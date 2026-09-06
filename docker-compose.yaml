@@ -2,6 +2,12 @@
 # Usage: docker compose up -d
 # The same TimescaleDB image (timescale/timescaledb:latest-pg16) will later
 # be deployed to OpenShift as a StatefulSet — no polyglot persistence.
+#
+# Services:
+#   timescaledb    — PostgreSQL + TimescaleDB extension (storage backend)
+#   fake-exporter  — Python app exposing P0 metrics (simulates cAdvisor + Kepler)
+#   prometheus     — scrapes fake-exporter, provides PromQL endpoint
+#   grafana        — dashboards with Prometheus + TimescaleDB datasources pre-provisioned
 
 services:
   # --- TimescaleDB (PostgreSQL + time-series extension) ---
@@ -25,6 +31,60 @@ services:
       timeout: 3s
       retries: 5
 
+  # --- Fake metrics exporter (simulates cAdvisor + Kepler P0 metrics) ---
+  # WHY a separate container:
+  # - Prometheus scrapes it like a real cAdvisor/Kepler endpoint
+  # - Tests the full pipeline: exporter → Prometheus → our adapter → domain → API
+  # - Edge cases (empty namespaces, degraded sources) tested by changing this exporter
+  fake-exporter:
+    build: ./exporter
+    container_name: finops-fake-exporter
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+
+  # --- Prometheus (scrapes fake-exporter, provides PromQL) ---
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: finops-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+    depends_on:
+      fake-exporter:
+        condition: service_started
+
+  # --- Grafana (dashboards with pre-provisioned datasources) ---
+  grafana:
+    image: grafana/grafana:latest
+    container_name: finops-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_started
+      timescaledb:
+        condition: service_healthy
+
 volumes:
   timescaledb_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
     driver: local

@@ -1,0 +1,16 @@
+# Grafana dashboard provisioning config.
+# WHY: tells Grafana where to look for dashboard JSON files.
+# The actual dashboard JSON is a manual step (check Grafana visually).
+
+apiVersion: 1
+
+providers:
+  - name: "finops-greenit"
+    orgId: 1
+    folder: "FinOps"
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
