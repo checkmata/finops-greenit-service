@@ -1,0 +1,76 @@
+# =============================================================================
+# ConfigMap — application configuration (non-sensitive values)
+# =============================================================================
+# WHY a ConfigMap (not hardcoded env vars):
+#   - Configuration is environment-specific (dev/staging/prod)
+#   - Changing config doesn't require rebuilding the container image
+#   - Operators can see all configuration at a glance
+#   - ConfigMaps are Kubernetes-native (version-controlled, auditable)
+#
+# WHY not put secrets here:
+#   - ConfigMaps are visible in plaintext via `kubectl get configmap`
+#   - Secrets are base64-encoded and (with at-rest encryption) encrypted
+#   - Database password, API tokens → Secret; URLs, thresholds → ConfigMap
+#
+# DATABASE_URL construction strategy:
+#   - The ConfigMap holds DB_HOST, DB_PORT, DB_NAME (non-sensitive)
+#   - The Secret holds DB_USER, DB_PASSWORD (sensitive)
+#   - The Deployment combines them into DATABASE_URL via initContainer or env
+#   - This separates concerns: config ≠ secrets
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: finops-greenit-config
+  namespace: finops-greenit
+  labels:
+    app.kubernetes.io/name: finops-greenit-service
+    app.kubernetes.io/part-of: finops-greenit
+    app.kubernetes.io/component: config
+data:
+  # --- Prometheus ---
+  PROMETHEUS_URL: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+  # WHY this URL:
+  #   - Standard OpenShift Prometheus endpoint (prometheus-operated is the default Service)
+  #   - Port 9090 is Prometheus's query API port
+  #   - The ClusterRole grants cross-namespace read access to this Service
+
+  PROMETHEUS_QUERY_TIMEOUT_SECONDS: "10"
+  # WHY 10s: balances between slow queries and timeout kills
+  #   - Complex PromQL (30d rate) can take 5-8s on large clusters
+  #   - 10s gives headroom without blocking the health check too long
+
+  # --- TimescaleDB (non-sensitive parts) ---
+  DB_HOST: "timescaledb-svc.finops-greenit.svc.cluster.local"
+  # WHY internal DNS:
+  #   - The app runs in the same cluster, so it uses Service DNS
+  #   - No need for external IP or port mapping
+  #   - DNS resolution is handled by Kubernetes CoreDNS
+
+  DB_PORT: "5432"
+  DB_NAME: "finops_greenit"
+  # WHY finops_greenit:
+  #   - Matches POSTGRES_DB in the TimescaleDB Secret
+  #   - Matches the database name in docker-compose.yaml (local dev parity)
+
+  # --- Green IT constants (overridable per environment) ---
+  PUE_CONSTANT: "1.4"
+  GRID_CARBON_INTENSITY_GCO2_PER_KWH: "475.0"
+  COST_PER_VCPU_HOUR_USD: "0.03"
+  COST_PER_GB_HOUR_USD: "0.004"
+  COST_PER_GB_MONTH_USD: "0.10"
+  # WHY these are in ConfigMap (not hardcoded):
+  #   - Different clusters have different costs (AWS vs Azure vs on-prem)
+  #   - Different regions have different carbon intensity
+  #   - Changing these doesn't require a code deployment
+  #   - Operators can tune per environment
+
+  # --- API ---
+  API_PORT: "8080"
+  LOG_LEVEL: "INFO"
+  LOG_FORMAT: "json"
+  # WHY JSON logging:
+  #   - OpenShift collects logs via Fluentd/Fluent Bit
+  #   - JSON is machine-parseable (no regex needed)
+  #   - Structured fields enable filtering in Kibana/Grafana Loki

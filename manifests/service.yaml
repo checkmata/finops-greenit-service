@@ -1,0 +1,42 @@
+# =============================================================================
+# Service — ClusterIP for finops-greenit-service
+# =============================================================================
+# WHY ClusterIP:
+#   - The app is accessed via OpenShift Route (ingress), not directly
+#   - ClusterIP provides internal DNS for the Route to proxy to
+#   - No need for NodePort or LoadBalancer (Route handles external access)
+#
+# WHY a separate Service from TimescaleDB:
+#   - Different workloads (app vs database)
+#   - Different ports (8080 vs 5432)
+#   - Different health checks (HTTP vs TCP)
+#   - Clear separation for operators
+# =============================================================================
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: finops-greenit-service-svc
+  namespace: finops-greenit
+  labels:
+    app.kubernetes.io/name: finops-greenit-service
+    app.kubernetes.io/part-of: finops-greenit
+    app.kubernetes.io/component: api
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: finops-greenit-service
+    app.kubernetes.io/part-of: finops-greenit
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+    - name: metrics
+      port: 8080
+      targetPort: http
+      protocol: TCP
+      # WHY a second port alias:
+      #   - Prometheus scrape target: finops-greenit-service-svc.finops-greenit:8080/metrics
+      #   - Both ports point to the same container port (8080)
+      #   - The alias makes it clear which port Prometheus uses

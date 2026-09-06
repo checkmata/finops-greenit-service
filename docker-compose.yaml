@@ -1,0 +1,30 @@
+# finops-greenit-service — local development stack
+# Usage: docker compose up -d
+# The same TimescaleDB image (timescale/timescaledb:latest-pg16) will later
+# be deployed to OpenShift as a StatefulSet — no polyglot persistence.
+
+services:
+  # --- TimescaleDB (PostgreSQL + time-series extension) ---
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: finops-timescaledb
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: finops_greenit
+      POSTGRES_USER: finops
+      POSTGRES_PASSWORD: finops_dev_password
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+      # Run migrations on first start (idempotent — safe to re-run)
+      - ./app/adapters/outbound/db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finops -d finops_greenit"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  timescaledb_data:
+    driver: local

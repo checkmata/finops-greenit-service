@@ -1,0 +1,279 @@
+# =============================================================================
+# Deployment — finops-greenit-service (FastAPI application)
+# =============================================================================
+# WHY Deployment (not StatefulSet):
+#   - The app is stateless — no persistent storage, no stable identity needed
+#   - Deployments are simpler: rolling updates, auto-scaling, easy rollback
+#   - StatefulSets are for stateful workloads (databases, caches, queues)
+#   - If the pod restarts, it gets a new random name — no data loss (stateless)
+#
+# Image strategy:
+#   - Build locally: podman build -t quay.io/YOUR_ORG/finops-greenit-service:latest .
+#   - Push to registry: podman push quay.io/YOUR_ORG/finops-greenit-service:latest
+#   - Update this YAML: replace the image field with your registry path
+#
+# Secret injection strategy:
+#   - DATABASE_URL comes from the Secret (contains password)
+#   - ConfigMap provides non-sensitive values (Prometheus URL, DB host, etc.)
+#   - pydantic-settings reads env vars → no code changes needed
+# =============================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: finops-greenit-service
+  namespace: finops-greenit
+  labels:
+    app.kubernetes.io/name: finops-greenit-service
+    app.kubernetes.io/part-of: finops-greenit
+    app.kubernetes.io/component: api
+    app.kubernetes.io/version: "0.1.0"
+spec:
+  replicas: 1
+  # WHY 1 replica for MVP:
+  #   - Single scheduler instance (no distributed locking)
+  #   - The scheduler writes to TimescaleDB — concurrent writes need coordination
+  #   - Scale to 2+ only if you add distributed locking or leader election
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: finops-greenit-service
+      app.kubernetes.io/part-of: finops-greenit
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+    # WHY RollingUpdate:
+    #   - Zero-downtime deployments (new pods start before old ones stop)
+    #   - maxUnavailable:1 means at most 1 pod down during rollout
+    #   - maxSurge:1 means at most 1 extra pod during rollout
+    #   - For a single-replica deployment, this means brief downtime during rollout
+    #     (new pod must start before old one stops → 2 pods during transition)
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: finops-greenit-service
+        app.kubernetes.io/part-of: finops-greenit
+        app.kubernetes.io/component: api
+      annotations:
+        # Prometheus scrape annotations (Prometheus Operator pattern)
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Service account — uses the dedicated SA with Prometheus read access
+      serviceAccountName: finops-greenit
+      # WHY not default SA:
+      #   - Default SA might have extra permissions (depends on cluster config)
+      #   - Dedicated SA makes RBAC audit trail clear
+      #   - Follows principle of least privilege
+
+      # Security context — container-level settings
+      securityContext:
+        runAsNonRoot: true
+        # WHY runAsNonRoot:
+        #   - OpenShift best practice
+        #   - Prevents container from running as root (UID 0)
+        #   - The container image defines the non-root user
+        runAsUser: 1000
+        # WHY 1000:
+        #   - Standard non-root UID
+        #   - OpenShift may override with its own UID (1000650000+)
+        #   - This is the fallback for non-OpenShift environments
+
+      # Init container — wait for TimescaleDB to be ready
+      initContainers:
+        - name: wait-for-db
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for TimescaleDB to accept connections..."
+              until nc -z timescaledb-svc.finops-greenit.svc.cluster.local 5432; do
+                echo "  TimescaleDB not ready, retrying in 2s..."
+                sleep 2
+              done
+              echo "TimescaleDB is ready."
+          # WHY init container:
+          #   - The app's DATABASE_URL points to timescaledb-svc
+          #   - If TimescaleDB isn't ready, the app crashes on startup
+          #   - Init containers run BEFORE the main container
+          #   - This blocks startup until the DB is reachable
+          #   - busybox is tiny (~1MB) and includes nc (netcat)
+
+      containers:
+        - name: finops-greenit-service
+          image: quay.io/YOUR_ORG/finops-greenit-service:latest
+          # WHY this image path:
+          #   - Replace YOUR_ORG with your actual registry organization
+          #   - Tag with :latest for dev, with :v0.1.0 for production
+          #   - Pull policy: IfNotPresent (default) is fine for :latest
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          # Environment variables — mix of ConfigMap and Secret
+          env:
+            # --- From Secret (sensitive) ---
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: finops-greenit-secrets
+                  key: DATABASE_URL
+            # WHY from Secret:
+            #   - DATABASE_URL contains the password
+            #   - Secrets are (optionally) encrypted at rest
+            #   - Not visible in `kubectl describe pod` output
+
+            # --- From ConfigMap (non-sensitive) ---
+            - name: PROMETHEUS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: finops-greenit-config
+                  key: PROMETHEUS_URL
+
+            - name: PROMETHEUS_QUERY_TIMEOUT_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: finops-greenit-config
+                  key: PROMETHEUS_QUERY_TIMEOUT_SECONDS
+
+            - name: PUE_CONSTANT
+              valueFrom:
+                configMapKeyRef:
+                  name: finops-greenit-config
+                  key: PUE_CONSTANT
+
+            - name: GRID_CARBON_INTENSITY_GCO2_PER_KWH
+              valueFrom:
+                configMapKeyRef:
+                  name: finops-greenit-config
+                  key: GRID_CARBON_INTENSITY_GCO2_PER_KWH
+
+            - name: COST_PER_VCPU_HOUR_USD
+              valueFrom:
+                configMapKeyRef:
+                  name: finops-greenit-config
+                  key: COST_PER_VCPU_HOUR_USD
+
+            - name: COST_PER_GB_HOUR_USD
+              valueFrom:
+                configMapKeyRef:
+                  name: finops-greenit-config
+                  key: COST_PER_GB_HOUR_USD
+
+            - name: COST_PER_GB_MONTH_USD
+              valueFrom:
+                configMapKeyRef:
+                  name: finops-greenit-config
+                  key: COST_PER_GB_MONTH_USD
+
+            - name: API_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: finops-greenit-config
+                  key: API_PORT
+
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: finops-greenit-config
+                  key: LOG_LEVEL
+
+            - name: LOG_FORMAT
+              valueFrom:
+                configMapKeyRef:
+                  name: finops-greenit-config
+                  key: LOG_FORMAT
+
+          # Resource requests/limits
+          resources:
+            requests:
+              cpu: "100m"
+              # WHY 100m: the FastAPI app is I/O-bound (waiting on Prometheus/DB)
+              #   CPU is mostly idle during request handling
+              #   100m is enough for the uvicorn worker + scheduler
+            memory: "256Mi"
+              # WHY 256Mi:
+              #   - Python base: ~50MB
+              #   - FastAPI + uvicorn: ~30MB
+              #   - httpx connection pool: ~20MB
+              #   - SQLAlchemy session pool: ~30MB
+              #   - Headroom for Prometheus query results: ~126MB
+            limits:
+              cpu: "1"
+              # WHY 1 core: allow burst for Prometheus queries + DB writes
+              #   The scheduler runs every 5min, processes all namespaces in parallel
+              #   During that burst, CPU spikes to 0.5-0.8 cores
+            memory: "512Mi"
+              # WHY 512Mi:
+              #   - Prevents OOM kill during large query results
+              #   - If Prometheus returns 1000+ series, memory spikes
+              #   - Monitor: if OOM occurs, increase this limit
+
+          # Liveness probe — restart the pod if the app is unresponsive
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            # WHY /health (not /docs or /openapi.json):
+            #   - /health checks BOTH Prometheus and Database connectivity
+            #   - If either is down, the app is partially broken
+            #   - /docs doesn't check database connectivity
+            #   - The health endpoint returns 503 if any dependency is unhealthy
+            initialDelaySeconds: 15
+            # WHY 15s: app starts in ~5-10s, plus init container waits for DB
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+            # If /health fails 3 times (60s total), restart the pod
+
+          # Readiness probe — remove from Service if not ready
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            # WHY 5s: app starts faster than DB check completes
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+            # Pod removed from Service if /health fails 3 times (30s)
+
+          # Startup probe — give the app time to start (slow startup protection)
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+            # WHY 30 failures × 5s = 150s max startup time:
+            #   - The init container (wait-for-db) can take 60-90s
+            #   - The app itself starts in 5-10s after init completes
+            #   - 150s covers worst-case DB startup + app startup
+            #   - If it takes longer, something is wrong → restart
+
+          # Volume mounts
+          volumeMounts:
+            - name: app-cache
+              mountPath: /app/.pytest_cache
+              readOnly: true
+              # Not actually needed — just a placeholder for future use
+
+      # Volumes
+      volumes:
+        - name: app-cache
+          emptyDir: {}
+          # Empty cache volume — prevents writable layer bloat
+
+      # Image pull secrets (if using a private registry)
+      # imagePullSecrets:
+      #   - name: quay-pull-secret
+      #   - WHY: required for private registries (quay.io, ghcr.io)
+      #   - Not needed for public registries

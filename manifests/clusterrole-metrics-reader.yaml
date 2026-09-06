@@ -1,0 +1,92 @@
+# =============================================================================
+# ClusterRole + ClusterRoleBinding — Prometheus read-only access
+# =============================================================================
+# WHY ClusterRole (not Role):
+#   - Prometheus is typically deployed in a different namespace (monitoring)
+#   - A Role only grants access within its own namespace
+#   - ClusterRole + ClusterRoleBinding grants cross-namespace read access
+#   - We bind it to the ServiceAccount in finops-greenit namespace
+#
+# WHY these specific resources:
+#   - /metrics: raw Prometheus metrics endpoint (used by the adapter)
+#   - /api/v1/query: PromQL instant queries (used by the adapter)
+#   - /api/v1/query_range: PromQL range queries (reserved for future use)
+#   - nodes/metrics: node-level cAdvisor metrics (via kubelet)
+#   - pods/metrics: pod-level metrics (via kubelet)
+#
+# WHY only get/list/watch (no create/update/delete):
+#   - The service READS metrics — it never modifies Prometheus state
+#   - This is a read-only adapter, not a Prometheus management tool
+#   - Least privilege: even if compromised, the attacker can only READ metrics
+# =============================================================================
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: finops-greenit-metrics-reader
+  labels:
+    app.kubernetes.io/name: finops-greenit-service
+    app.kubernetes.io/part-of: finops-greenit
+    app.kubernetes.io/component: rbac
+rules:
+  # Prometheus query API (read-only)
+  - apiGroups: [""]
+    resources: ["services/proxy"]
+    verbs: ["get", "list"]
+    # WHY services/proxy:
+    #   - This is how you access a service's API through the Kubernetes API server
+    #   - Required when Prometheus is accessed via kubectl proxy or service proxy
+    #   - The adapter calls: GET /api/v1/query?query=<PromQL>
+
+  # Node-level metrics (cAdvisor, kubelet, node-exporter)
+  - apiGroups: [""]
+    resources: ["nodes/metrics"]
+    verbs: ["get", "list"]
+    # WHY nodes/metrics:
+    #   - cAdvisor metrics are exposed via kubelet's /metrics endpoint
+    #   - node-exporter metrics require this for scraping
+    #   - Used for CPU/memory utilization per node
+
+  # Pod-level metrics (kubelet)
+  - apiGroups: [""]
+    resources: ["pods/metrics"]
+    verbs: ["get", "list"]
+    # WHY pods/metrics:
+    #   - Pod-level resource usage comes from kubelet's summary API
+    #   - Used for per-pod CPU/memory attribution
+
+---
+# =============================================================================
+# ClusterRoleBinding — bind the ClusterRole to the ServiceAccount
+# =============================================================================
+# WHY ClusterRoleBinding (not RoleBinding):
+#   - The ClusterRole is cluster-scoped (defined above)
+#   - ClusterRoleBinding binds it to a specific ServiceAccount
+#   - RoleBinding only works with Role (namespace-scoped), not ClusterRole
+#
+# WHY bind to the ServiceAccount in finops-greenit namespace:
+#   - The pod runs in finops-greenit namespace with this ServiceAccount
+#   - This grants the ServiceAccount (and thus the pod) Prometheus read access
+#   - No other pods or ServiceAccounts get these permissions
+# =============================================================================
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: finops-greenit-metrics-reader
+  labels:
+    app.kubernetes.io/name: finops-greenit-service
+    app.kubernetes.io/part-of: finops-greenit
+    app.kubernetes.io/component: rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: finops-greenit-metrics-reader
+subjects:
+  - kind: ServiceAccount
+    name: finops-greenit
+    namespace: finops-greenit
+    # WHY specify namespace:
+    #   - ClusterRoleBinding subjects are namespace-scoped
+    #   - The ServiceAccount lives in finops-greenit namespace
+    #   - Without namespace, Kubernetes looks in the default namespace

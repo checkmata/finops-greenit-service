@@ -102,6 +102,12 @@ class Settings(BaseSettings):
         description="TTL for Prometheus query result cache",
     )
 
+    # --- Database (TimescaleDB) ---
+    DATABASE_URL: str = Field(
+        default="postgresql://finops:finops_dev_password@localhost:5432/finops_greenit",
+        description="PostgreSQL connection string (TimescaleDB-compatible)",
+    )
+
 
 # Module-level instance for easy import: `from app.config import settings`
 settings = Settings()

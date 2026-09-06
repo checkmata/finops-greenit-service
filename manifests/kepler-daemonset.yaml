@@ -1,0 +1,299 @@
+# =============================================================================
+# Namespace + ServiceAccount + DaemonSet + Service — Kepler eBPF
+# =============================================================================
+# WHY Kepler is the ONLY component we deploy ourselves:
+#   - OpenShift's built-in Prometheus already scrapes cAdvisor, kube-state-metrics,
+#     node-exporter, and kubelet (do NOT deploy these — they're built-in)
+#   - Kepler provides eBPF-based per-process energy attribution
+#   - It's scraped by the SAME Prometheus instance via ServiceMonitor
+#   - No external database, no separate scraping system
+#
+# WHY a DaemonSet (not Deployment):
+#   - Kepler needs eBPF access on EVERY node
+#   - eBPF programs run in the kernel — they can't run in a container
+#   - DaemonSet ensures exactly one pod per node
+#   - If a node joins the cluster, a Kepler pod starts automatically
+#
+# WHY the kepler namespace:
+#   - Isolates Kepler's RBAC from the app namespace
+#   - Kepler needs cluster-wide metrics access (not just one namespace)
+#   - The ServiceMonitor in this namespace is discovered by Prometheus Operator
+#
+# Image: quay.io/sustainable-computing-io/kepler:latest
+#   - Official Kepler image from the Sustainable Computing project
+#   - Includes eBPF programs for energy attribution
+#   - Requires privileged mode for eBPF access
+# =============================================================================
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kepler
+  labels:
+    app.kubernetes.io/name: kepler
+    app.kubernetes.io/part-of: finops-greenit
+    # WHY pod-security.kubernetes.io/enforce: privileged:
+    #   - Kepler needs eBPF access (privileged operation)
+    #   - OpenShift's Security Context Constraints (SCC) handle this
+    #   - This label tells Pod Security Admission to allow privileged pods
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+
+---
+# =============================================================================
+# ServiceAccount — identity for Kepler pods
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kepler
+  namespace: kepler
+  labels:
+    app.kubernetes.io/name: kepler
+    app.kubernetes.io/part-of: finops-greenit
+
+---
+# =============================================================================
+# ClusterRole — Kepler needs to read node/pod metadata for energy attribution
+# =============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kepler
+  labels:
+    app.kubernetes.io/name: kepler
+    app.kubernetes.io/part-of: finops-greenit
+rules:
+  # Read node metadata (name, labels, capacity)
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  # Read pod metadata (namespace, labels, ownerReferences)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # Read pod status (resource usage from cAdvisor)
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["get"]
+  # Read namespace metadata (for team/cost_center labels)
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+  # Read ReplicaSet (for deployment attribution)
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list"]
+  # Read Deployment (for deployment attribution)
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+  # Read node stats (cAdvisor)
+  - apiGroups: [""]
+    resources: ["nodes/stats"]
+    verbs: ["get"]
+  # WHY all these reads:
+  #   - Kepler attributes energy to pods, deployments, namespaces
+  #   - It needs to map pod → namespace → team → cost_center
+  #   - It reads cAdvisor stats for actual resource usage
+  #   - No write operations — read-only access
+
+---
+# =============================================================================
+# ClusterRoleBinding — bind ClusterRole to ServiceAccount
+# =============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kepler
+  labels:
+    app.kubernetes.io/name: kepler
+    app.kubernetes.io/part-of: finops-greenit
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kepler
+subjects:
+  - kind: ServiceAccount
+    name: kepler
+    namespace: kepler
+
+---
+# =============================================================================
+# DaemonSet — Kepler eBPF energy monitor (one pod per node)
+# =============================================================================
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kepler
+  namespace: kepler
+  labels:
+    app.kubernetes.io/name: kepler
+    app.kubernetes.io/part-of: finops-greenit
+    app.kubernetes.io/component: energy-monitor
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kepler
+      app.kubernetes.io/part-of: finops-greenit
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+    # WHY RollingUpdate:
+    #   - Update one node at a time (minimize eBPF disruption)
+    #   - maxUnavailable:1 ensures only one node is updating at a time
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kepler
+        app.kubernetes.io/part-of: finops-greenit
+        app.kubernetes.io/component: energy-monitor
+      annotations:
+        # Prometheus scrape annotations
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9103"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: kepler
+      # WHY kepler SA:
+      #   - Needs cluster-wide read access (node, pod, namespace metadata)
+      #   - Dedicated SA makes RBAC audit trail clear
+      tolerations:
+        # Kepler must run on ALL nodes (including masters and infra)
+        - operator: Exists
+          effect: NoSchedule
+        - operator: Exists
+          effect: NoExecute
+        # WHY tolerate all taints:
+        #   - Master/infra nodes have taints that prevent normal pods
+        #   - Kepler needs to monitor energy on ALL nodes
+        #   - It's a monitoring tool, not a workload — it should run everywhere
+      hostPID: true
+      # WHY hostPID:
+      #   - Kepler uses eBPF to trace process-level energy
+      #   - It needs to see all processes on the node (not just container processes)
+      #   - Without hostPID, eBPF can't attribute energy to specific processes
+      hostNetwork: false
+      # WHY hostNetwork:false:
+      #   - Kepler doesn't need host networking
+      #   - It scrapes /proc and /sys for energy data
+      #   - Keeping hostNetwork:false follows least privilege
+      containers:
+        - name: kepler
+          image: quay.io/sustainable-computing-io/kepler:latest
+          # WHY this image:
+          #   - Official Kepler image from the Sustainable Computing project
+          #   - Includes eBPF programs for energy attribution
+          #   - Multi-arch: supports amd64 and arm64
+          ports:
+            - name: metrics
+              containerPort: 9103
+              protocol: TCP
+              # WHY 9103:
+              #   - Default Kepler metrics port
+              #   - Prometheus scrapes this port via ServiceMonitor
+          env:
+            - name: ENABLE_GPU
+              value: "false"
+            # WHY ENABLE_GPU:false:
+            #   - GPU energy monitoring requires NVIDIA DCGM exporter
+            #   - Not in scope for MVP (CPU/memory only)
+            #   - Set to "true" if GPU workloads need energy attribution
+
+            - name: METRICS_PATH
+              value: "/metrics"
+            # WHY explicit METRICS_PATH:
+            #   - Kepler's default is /metrics
+            #   - Being explicit prevents surprises if upstream changes
+
+            - name: METRICS_PORT
+              value: "9103"
+          resources:
+            requests:
+              cpu: "50m"
+              # WHY 50m: Kepler's eBPF programs are lightweight
+              #   - They run in kernel space (not user space)
+              #   - User-space overhead is minimal (reading /proc, /sys)
+              memory: "128Mi"
+              # WHY 128Mi:
+              #   - eBPF maps are stored in kernel memory (not counted here)
+              #   - User-space process needs ~50-80MB for metadata caching
+              #   - Prometheus metrics buffer: ~30MB
+            limits:
+              cpu: "500m"
+              # WHY 500m: allow burst during eBPF map reads
+              memory: "512Mi"
+              # WHY 512Mi:
+              #   - eBPF maps can grow with many containers
+              #   - On large clusters (100+ nodes), memory usage increases
+              #   - Monitor: if OOM occurs, increase this limit
+          securityContext:
+            privileged: true
+            # WHY privileged:
+            #   - Kepler uses eBPF which requires CAP_SYS_ADMIN
+            #   - OpenShift's SCC grants this to the kepler SA
+            #   - Without privileged, eBPF programs can't load
+            #   - This is the MINIMUM privilege for eBPF
+          volumeMounts:
+            - name: kepler-host
+              mountPath: /proc
+              readOnly: true
+              # WHY mount /proc:
+              #   - Kepler reads /proc/stat for CPU frequency
+              #   - /proc/cpuinfo for CPU model
+              #   - /sys/devices/system/cpu for power management
+            - name: sys-kernel
+              mountPath: /sys
+              readOnly: true
+              # WHY mount /sys:
+              #   - Kepler reads /sys/class/powercap for RAPL energy data
+              #   - /sys/devices/system/cpu/cpu*/cpufreq for frequency scaling
+            - name: var-run
+              mountPath: /var/run
+              # WHY mount /var/run:
+              #   - Kepler writes its eBPF program socket here
+              #   - Needed for inter-process communication
+      volumes:
+        - name: kepler-host
+          hostPath:
+            path: /proc
+            type: Directory
+        - name: sys-kernel
+          hostPath:
+            path: /sys
+            type: Directory
+        - name: var-run
+          hostPath:
+            path: /var/run
+            type: Directory
+
+---
+# =============================================================================
+# Service — exposes Kepler metrics to Prometheus
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: kepler
+  namespace: kepler
+  labels:
+    app.kubernetes.io/name: kepler
+    app.kubernetes.io/part-of: finops-greenit
+    app.kubernetes.io/component: energy-monitor
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kepler
+    app.kubernetes.io/part-of: finops-greenit
+  ports:
+    - name: metrics
+      port: 9103
+      targetPort: metrics
+      protocol: TCP
+  # WHY ClusterIP:
+  #   - Kepler metrics are only consumed by Prometheus (in-cluster)
+  #   - No external access needed
+  #   - Prometheus Operator discovers this Service via ServiceMonitor

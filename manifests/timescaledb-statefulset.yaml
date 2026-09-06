@@ -1,0 +1,231 @@
+# =============================================================================
+# StatefulSet — TimescaleDB (PostgreSQL + time-series extension)
+# =============================================================================
+# WHY StatefulSet (not Deployment):
+#   1. Stable network identity: the pod is always named timescaledb-0
+#      - The Service DNS is always timescaledb-svc.finops-greenit.svc
+#      - Deployment pods get random suffixes (timescaledb-a1b2c) on restart
+#      - Stable DNS means the app's DATABASE_URL never changes
+#
+#   2. Stable persistent storage: the PVC is bound to the pod name
+#      - timescaledb-0 always gets the same PVC (timescaledb-data-timescaledb-0)
+#      - If the pod restarts, it reconnects to the SAME data
+#      - Deployment pods might get a different PVC on restart (data loss!)
+#
+#   3. Ordered deployment: pods start/stop in order (0, 1, 2...)
+#      - Matters for database clustering (single replica for MVP)
+#      - Ensures clean shutdown before restart
+#
+#   4. PVC template: the StatefulSet creates PVCs automatically
+#      - No manual PVC creation needed
+#      - PVCs persist even if the StatefulSet is deleted (safety net)
+#
+# WHY single replica for MVP:
+#   - TimescaleDB streaming replication requires licenses (not in scope)
+#   - A single replica with PVC-backed storage is sufficient for dev/staging
+#   - Production would add a standby replica + Patroni for HA
+#
+# WHY the SAME image as docker-compose:
+#   - timescale/timescaledb:latest-pg16 is the exact same image locally
+#   - Same schema (001_init.sql), same extension, same behavior
+#   - No adapter code changes between local dev and OpenShift
+#   - The only difference: local uses port mapping, OpenShift uses Service DNS
+# =============================================================================
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: timescaledb
+  namespace: finops-greenit
+  labels:
+    app.kubernetes.io/name: timescaledb
+    app.kubernetes.io/part-of: finops-greenit
+    app.kubernetes.io/component: database
+spec:
+  serviceName: timescaledb-svc
+  # WHY serviceName: required for StatefulSet — headless Service for DNS
+  replicas: 1
+  # Single replica for MVP. Scale to 3 for HA with TimescaleDB replication.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: timescaledb
+      app.kubernetes.io/part-of: finops-greenit
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: timescaledb
+        app.kubernetes.io/part-of: finops-greenit
+        app.kubernetes.io/component: database
+    spec:
+      # Security: don't run as root
+      securityContext:
+        runAsUser: 999    # postgres user in the TimescaleDB image
+        runAsGroup: 999
+        fsGroup: 999
+      containers:
+        - name: timescaledb
+          image: timescale/timescaledb:latest-pg16
+          # WHY this specific image:
+          #   - Same image used in docker-compose.yaml (local dev parity)
+          #   - Includes PostgreSQL 16 + TimescaleDB extension
+          #   - Alpine-based: smaller attack surface
+          #   - Auto-initializes via docker-entrypoint-initdb.d
+
+          ports:
+            - name: postgresql
+              containerPort: 5432
+              protocol: TCP
+
+          # Environment variables from Secret (never hardcoded)
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: timescaledb-credentials
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: timescaledb-credentials
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: timescaledb-credentials
+                  key: POSTGRES_DB
+            # WHY these three env vars:
+            #   - The TimescaleDB image expects POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
+            #   - They configure the initial database and superuser
+            #   - On first start, the entrypoint creates the database and user
+            #   - On subsequent starts, it skips initialization (data persists in PVC)
+
+            # Additional TimescaleDB tuning for OpenShift
+            - name: TIMESCALEDB_TELEMETRY
+              value: "off"
+            # WHY TIMESCALEDB_TELEMETRY off:
+            #   - Disables anonymous usage telemetry (privacy/security)
+            #   - Reduces network calls from the database
+
+          # Resource limits — prevent the DB from consuming all node resources
+          resources:
+            requests:
+              cpu: "500m"
+              # WHY 500m: TimescaleDB needs CPU for query planning, chunk creation
+              # A single query can spike to 1 core during chunk compression
+              memory: "512Mi"
+              # WHY 512Mi: PostgreSQL shared_buffers + work_mem + OS cache
+              # Typical: shared_buffers=128MB + work_mem=32MB + OS overhead
+            limits:
+              cpu: "2"
+              # WHY 2 cores: allow burst for bulk inserts, chunk creation, VACUUM
+              # TimescaleDB background workers (scheduler, jobs) consume CPU
+              memory: "2Gi"
+              # WHY 2Gi: PostgreSQL can use up to shared_buffers + work_mem * max_connections
+              # OOM kill means data loss — set limits high enough for normal operation
+              # Monitor: if OOM occurs, increase this limit
+
+          # Persistent storage — the PVC template
+          volumeMounts:
+            - name: timescaledb-data
+              mountPath: /var/lib/postgresql/data
+              # WHY /var/lib/postgresql/data:
+              #   - Standard PostgreSQL data directory
+              #   - The TimescaleDB image writes here by default
+              #   - PVC persists across pod restarts, reschedules, and node failures
+
+            - name: migrations
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+              # WHY mount migrations here:
+              #   - The TimescaleDB image auto-runs scripts in this directory on first start
+              #   - 001_init.sql creates the schema + hypertable + retention policy
+              #   - Idempotent (IF NOT EXISTS) — safe to re-run on restart
+
+            - name: tmp
+              mountPath: /tmp
+              # WHY /tmp volume:
+              #   - TimescaleDB uses /tmp for sorting, temp files
+              #   - EmptyDir ensures clean /tmp on each restart
+              #   - Prevents /tmp from filling up the writable layer
+
+          # Liveness probe — restart the pod if PostgreSQL is unresponsive
+          livenessProbe:
+            tcpSocket:
+              port: postgresql
+            # WHY tcpSocket (not HTTP):
+            #   - PostgreSQL doesn't have an HTTP health endpoint
+            #   - TCP connect proves the port is listening
+            #   - If the process is alive but not accepting TCP, it's stuck
+            initialDelaySeconds: 30
+            # WHY 30s: PostgreSQL takes 10-20s to start, plus time for init scripts
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+            # If TCP fails 3 times (30s total), restart the pod
+
+          # Readiness probe — remove from Service if not ready
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - finops
+                - -d
+                - finops_greenit
+            # WHY pg_isready:
+            #   - PostgreSQL's built-in readiness check
+            #   - Returns 0 if the server is accepting connections
+            #   - More accurate than TCP: proves the database is fully initialized
+            #   - The TCP probe might pass before pg_isready returns 0
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+            # Pod removed from Service if pg_isready fails 3 times (15s)
+
+      # Volumes (non-PVC)
+      volumes:
+        - name: migrations
+          configMap:
+            name: timescaledb-migrations
+            # WHY ConfigMap:
+            #   - 001_init.sql is small (<1KB)
+            #   - ConfigMaps are the standard way to inject files into pods
+            #   - Mounted read-only — no write access to migration files
+            #   - Updates to the ConfigMap trigger pod restart (optional rollout)
+
+        - name: tmp
+          emptyDir: {}
+          # WHY emptyDir for /tmp:
+          #   - Ephemeral storage for PostgreSQL temp files
+          #   - Cleaned up on pod restart
+          #   - Prevents writable layer bloat
+
+  # PVC template — StatefulSet creates this automatically
+  volumeClaimTemplates:
+    - metadata:
+        name: timescaledb-data
+        labels:
+          app.kubernetes.io/name: timescaledb
+          app.kubernetes.io/part-of: finops-greenit
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        # WHY ReadWriteOnce:
+        #   - Only one pod (timescaledb-0) mounts this PVC
+        #   - ReadOnlyMany/ReadWriteMany are not needed for a single-replica DB
+        #   - RWO is supported by all storage providers (gp3, managed-premium, etc.)
+        resources:
+          requests:
+            storage: 5Gi
+            # WHY 5Gi:
+            #   - 7-day retention = ~20,160 rows/namespace × 2 namespaces × ~1KB/row = ~40MB
+            #   - Recommendations table: ~1,000 rows × ~1KB = ~1MB
+            #   - PostgreSQL overhead (WAL, temp): ~1GB
+            #   - 5Gi gives 3-5x headroom for growth
+            #   - Monitor PVC usage and expand if needed (online resize supported)
+        # WHY no storageClassName:
+        #   - Omitting lets the cluster use its default StorageClass
+        #   - Different clusters have different storage (gp3, managed-premium, local)
+        #   - Setting a specific class would break on clusters without it
+        #   - OpenShift clusters typically have a default StorageClass configured

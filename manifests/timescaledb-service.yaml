@@ -1,0 +1,50 @@
+# =============================================================================
+# Service — internal ClusterIP for TimescaleDB
+# =============================================================================
+# WHY ClusterIP (not NodePort or LoadBalancer):
+#   - TimescaleDB should only be accessible from within the cluster
+#   - The finops-greenit-service pod connects via this Service
+#   - Grafana (if deployed in-cluster) can also query via this Service
+#   - No external access needed — prevents accidental exposure
+#
+# WHY a dedicated Service (not shared with the app):
+#   - TimescaleDB and the FastAPI app are different workloads
+#   - They scale independently (app: Deployment, DB: StatefulSet)
+#   - Different health check patterns (HTTP vs TCP/PostgreSQL)
+#   - Clear separation of concerns for operators
+#
+# Connection string for the app:
+#   postgresql://finops:<password>@timescaledb-svc.finops-greenit.svc:5432/finops_greenit
+#
+# Connection string for Grafana:
+#   Host: timescaledb-svc.finops-greenit.svc
+#   Port: 5432
+#   Database: finops_greenit
+#   User: finops
+#   Password: (from Secret)
+# =============================================================================
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: timescaledb-svc
+  namespace: finops-greenit
+  labels:
+    app.kubernetes.io/name: timescaledb
+    app.kubernetes.io/part-of: finops-greenit
+    app.kubernetes.io/component: database
+spec:
+  type: ClusterIP
+  # WHY ClusterIP: internal only, no external exposure
+  # The app and Grafana connect via DNS: timescaledb-svc.finops-greenit.svc.cluster.local
+  selector:
+    app.kubernetes.io/name: timescaledb
+    app.kubernetes.io/part-of: finops-greenit
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: 5432
+      protocol: TCP
+      # WHY 5432: standard PostgreSQL port, TimescaleDB uses the same port
+  # No externalIPs, no loadBalancerIP, no nodePort — strictly internal
+  # No sessionAffinity — round-robin is fine for a single-replica StatefulSet

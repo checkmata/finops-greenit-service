@@ -1,0 +1,86 @@
+# =============================================================================
+# ServiceMonitor — tells Prometheus Operator to scrape Kepler metrics
+# =============================================================================
+# WHY ServiceMonitor (not manual Prometheus config):
+#   - Prometheus Operator uses ServiceMonitors to manage scrape targets
+#   - Adding/removing a ServiceMonitor automatically updates Prometheus config
+#   - No need to manually edit prometheus.yml (which doesn't exist in Operator)
+#   - Standard pattern for OpenShift monitoring
+#
+# WHY a separate ServiceMonitor (not inline in the DaemonSet):
+#   - ServiceMonitors are cluster-scoped resources
+#   - They can be in a different namespace than the target Service
+#   - Kepler's ServiceMonitor is in the kepler namespace
+#   - Prometheus Operator discovers ServiceMonitors across all namespaces
+#
+# Prometheus discovery flow:
+#   1. Prometheus Operator watches for ServiceMonitor resources
+#   2. ServiceMonitor specifies which Services to scrape
+#   3. Operator generates prometheus.yml config
+#   4. Prometheus reloads config automatically
+#   5. Prometheus starts scraping the Service's endpoints
+# =============================================================================
+
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kepler
+  namespace: kepler
+  labels:
+    app.kubernetes.io/name: kepler
+    app.kubernetes.io/part-of: finops-greenit
+    app.kubernetes.io/component: energy-monitor
+    # WHY these labels:
+    #   - Prometheus Operator uses labels to match ServiceMonitors to Prometheus instances
+    #   - The default OpenShift Prometheus has label selectors for ServiceMonitors
+    #   - If your Prometheus Operator uses different labels, update these
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kepler
+      app.kubernetes.io/part-of: finops-greenit
+    # WHY matchLabels:
+    #   - Matches the kepler Service (which has these labels)
+    #   - Only the kepler Service is scraped (not other Services in the namespace)
+    #   - Labels are the standard way to select targets in Kubernetes
+  namespaceSelector:
+    matchNames:
+      - kepler
+    # WHY namespaceSelector:
+    #   - Tells Prometheus to look for the Service in the kepler namespace
+    #   - Without this, Prometheus looks in its own namespace
+    #   - Ensures cross-namespace scraping works
+  endpoints:
+    - port: metrics
+      # WHY port:metrics:
+      #   - Matches the port name in the kepler Service (port 9103)
+      #   - Prometheus scrapes this port on all kepler pods (one per node)
+      interval: 30s
+      # WHY 30s:
+      #   - Kepler metrics change slowly (energy is cumulative)
+      #   - 30s is the standard Prometheus scrape interval
+      #   - More frequent scraping wastes resources (energy data doesn't change fast)
+      scrapeTimeout: 10s
+      # WHY 10s:
+      #   - Must be less than interval (30s)
+      #   - Kepler's /metrics endpoint is lightweight (<1MB)
+      #   - 10s gives enough time for slow nodes (high CPU load)
+      path: /metrics
+      # WHY explicit path:
+      #   - Kepler's default is /metrics
+      #   - Being explicit prevents surprises if upstream changes
+      scheme: http
+      # WHY http (not https):
+      #   - Kepler runs inside the cluster (no TLS needed)
+      #   - Intra-cluster traffic is encrypted by the network (if overlay network is encrypted)
+      #   - For external Prometheus, use https + TLS config
+      # MetricRelabelings: drop high-cardinality labels
+      metricRelabelings:
+        - sourceLabels: [__name__]
+          regex: "kepler_.*"
+          action: keep
+          # WHY keep only kepler_* metrics:
+          #   - Kepler exposes some standard Prometheus metrics (go_*, process_*)
+          #   - We only care about kepler_* metrics (energy, power, carbon)
+          #   - Reduces scrape volume and storage costs
+          #   - Alternative: drop go_* metrics specifically

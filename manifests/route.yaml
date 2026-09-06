@@ -1,0 +1,78 @@
+# =============================================================================
+# Route — OpenShift Route for external access to finops-greenit-service
+# =============================================================================
+# WHY a Route (not Ingress):
+#   - OpenShift Routes are the native way to expose services
+#   - Routes use HAProxy as the edge router (built into OpenShift)
+#   - Routes support TLS termination (edge, passthrough, re-encrypt)
+#   - Ingress requires an IngressController (additional component)
+#
+# WHY edge TLS termination:
+#   - TLS is terminated at the HAProxy edge router
+#   - Traffic from HAProxy to the pod is unencrypted (HTTP)
+#   - This is fine for internal cluster traffic (trusted network)
+#   - For sensitive data, use passthrough or re-encrypt TLS
+#
+# WHY a custom hostname:
+#   - The default hostname is <route-name>-<namespace>.<domain>
+#   - A custom hostname is more readable and professional
+#   - Change it to match your organization's DNS
+# =============================================================================
+
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: finops-greenit-service
+  namespace: finops-greenit
+  labels:
+    app.kubernetes.io/name: finops-greenit-service
+    app.kubernetes.io/part-of: finops-greenit
+    app.kubernetes.io/component: api
+spec:
+  to:
+    kind: Service
+    name: finops-greenit-service-svc
+    weight: 100
+    # WHY weight:100:
+    #   - All traffic goes to this Service (no canary/blue-green split)
+    #   - For canary deployments: split weight between two Services
+  port:
+    targetPort: http
+    # WHY targetPort:http:
+    #   - Matches the port name in the Service spec
+    #   - Ensures traffic routes to port 8080 on the pod
+  wildcardPolicy: None
+  # WHY wildcardPolicy:None:
+  #   - No wildcard domains (e.g., *.apps.cluster.example.com)
+  #   - Explicit hostname only — prevents accidental routing
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+    # WHY insecureEdgeTerminationPolicy:Redirect:
+    #   - HTTP requests (port 80) are redirected to HTTPS (port 443)
+    #   - Prevents unencrypted traffic from reaching the app
+    #   - Users always see HTTPS in their browser
+    certificate: |
+      -----BEGIN CERTIFICATE-----
+      REPLACE_WITH_YOUR_CERTIFICATE
+      -----END CERTIFICATE-----
+    key: |
+      -----BEGIN RSA PRIVATE KEY-----
+      REPLACE_WITH_YOUR_PRIVATE_KEY
+      -----END RSA PRIVATE KEY-----
+    caCertificate: |
+      -----BEGIN CERTIFICATE-----
+      REPLACE_WITH_YOUR_CA_CERTIFICATE
+      -----END CERTIFICATE-----
+    # WHY inline certificates:
+    #   - For dev/staging: use OpenShift's auto-generated TLS (remove tls section)
+    #   - For production: use cert-manager or manual certificate injection
+    #   - The certificate MUST match the hostname
+    #   - For auto-generated TLS, remove the entire tls section and use:
+    #     oc create route edge --service=finops-greenit-service-svc -n finops-greenit
+  # Alternative: auto-generated TLS (for dev/staging)
+  # To use auto-generated TLS, remove the tls section above and run:
+  #   oc create route edge finops-greenit-service \
+  #     --service=finops-greenit-service-svc \
+  #     --hostname=finops-greenit.apps.cluster.example.com \
+  #     -n finops-greenit
