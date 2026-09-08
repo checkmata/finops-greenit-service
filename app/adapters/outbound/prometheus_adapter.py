@@ -383,3 +383,11 @@ class PrometheusMetricsAdapter(MetricsPort):
             "No Kepler energy series found "
             "(checked container/node/package joules metrics)"
         )
+
+    async def close(self) -> None:
+        """Close the underlying httpx.AsyncClient connection pool.
+
+        WHY: prevents resource leaks when the app shuts down.
+        Called by main.py lifespan on shutdown.
+        """
+        await self._client.aclose()
