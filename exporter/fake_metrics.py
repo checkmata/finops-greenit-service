@@ -44,15 +44,9 @@ CONTAINER_MEMORY_WORKING_SET = Gauge(
 )
 
 # kube_pod_container_resource_requests — CPU and memory requests
-KUBE_POD_CONTAINER_RESOURCE_REQUESTS_CPU = Gauge(
+KUBE_POD_CONTAINER_RESOURCE_REQUESTS = Gauge(
     "kube_pod_container_resource_requests",
-    "CPU resource requests in cores",
-    ["namespace", "pod", "container", "resource"],
-)
-
-KUBE_POD_CONTAINER_RESOURCE_REQUESTS_MEMORY = Gauge(
-    "kube_pod_container_resource_requests",
-    "Memory resource requests in bytes",
+    "Resource requests (CPU in cores, memory in bytes)",
     ["namespace", "pod", "container", "resource"],
 )
 
@@ -148,10 +142,10 @@ def populate_metrics() -> None:
             ).set(256 * 1024 * 1024)
 
             # Requested: 2.0 cores CPU, 1 GiB memory (over-provisioned)
-            KUBE_POD_CONTAINER_RESOURCE_REQUESTS_CPU.labels(
+            KUBE_POD_CONTAINER_RESOURCE_REQUESTS.labels(
                 namespace="team-alpha", pod=pod_name, container=container, resource="cpu"
             ).set(2.0)
-            KUBE_POD_CONTAINER_RESOURCE_REQUESTS_MEMORY.labels(
+            KUBE_POD_CONTAINER_RESOURCE_REQUESTS.labels(
                 namespace="team-alpha", pod=pod_name, container=container, resource="memory"
             ).set(1024 * 1024 * 1024)
 
@@ -184,10 +178,10 @@ def populate_metrics() -> None:
             ).set(512 * 1024 * 1024)
 
             # Requested: 1.0 cores CPU, 768 MiB memory (well-utilized)
-            KUBE_POD_CONTAINER_RESOURCE_REQUESTS_CPU.labels(
+            KUBE_POD_CONTAINER_RESOURCE_REQUESTS.labels(
                 namespace="team-beta", pod=pod_name, container=container, resource="cpu"
             ).set(1.0)
-            KUBE_POD_CONTAINER_RESOURCE_REQUESTS_MEMORY.labels(
+            KUBE_POD_CONTAINER_RESOURCE_REQUESTS.labels(
                 namespace="team-beta", pod=pod_name, container=container, resource="memory"
             ).set(768 * 1024 * 1024)
 
