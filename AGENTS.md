@@ -11,7 +11,7 @@ Strict Hexagonal Architecture (Ports & Adapters).
 ## Data sources — exactly two, nothing else
 - OpenShift's built-in Prometheus (already scrapes cAdvisor, kube-state-metrics, node-exporter, kubelet by default — do not suggest deploying these).
 - Kepler eBPF DaemonSet (the only component we deploy ourselves) — scraped by the same Prometheus via ServiceMonitor.
-- No external database, no second scraping system, no live external API. PUE and grid carbon intensity are static constants in `app/config.py`, not fetched.
+- TimescaleDB (PostgreSQL + TimescaleDB extension) for persistence — deployed as part of our stack (container locally, StatefulSet on OpenShift), not an external managed service. No second scraping system, no live external API. PUE and grid carbon intensity are static constants in `app/config.py`, not fetched.
 - All telemetry — Prometheus core metrics AND Kepler metrics — goes through the single `app/adapters/outbound/prometheus_adapter.py`.
 
 ## Scope for this build (1-month MVP)
