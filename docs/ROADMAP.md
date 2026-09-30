@@ -89,8 +89,8 @@ Légende des statuts :
 | Élément | Statut |
 |---|---|
 | Tests | **VALIDATED** : 491 unitaires/intégration + 40 sur l'infrastructure réelle ; couverture de `app/` 87 % ; CI rejouée avec `act` 3/3 |
-| Commit / push de la branche `feature/v1-multicluster-workloads` | **REQUIRES USER ACTION** (rien n'est commité) |
-| Rotation des identifiants de dev du commit `bb6052c` (public sur `origin/main`) | **REQUIRES USER ACTION** (voir [LIMITATIONS](LIMITATIONS.md) §2 quater) |
+| Commit / push de la branche `feature/v1-multicluster-workloads` | **DONE** (`193e251`, CI GitHub 3/3) ; PR et fusion : **REQUIRES USER ACTION** |
+| Ancien mot de passe de dev (`bb6052c`, dépôt privé) | **VALIDATED inactif** (refusé par la base en service) ; retiré de `main` par la fusion ; historique conservé. Sa réutilisation éventuelle hors du projet est **REQUIRES USER ACTION** (voir [LIMITATIONS](LIMITATIONS.md) §2 quater) |
 | Suppression des anciennes VM minikube (arrêtées) | **REQUIRES USER ACTION** (facultatif) |
 | Alerting sur l'actionneur / la garde de données | **DEFERRED** |
 | SSO / double validation pour les actions de l'agent | **DEFERRED** |

@@ -89,9 +89,20 @@ Ce qui reste **non vérifié** :
 
 ## 2 quater. Sécurité du dépôt (audit du 30/09/2026)
 
-- **Commit `bb6052c`** (06/09/2026, présent sur `origin/main`, donc **public**) contient des identifiants de développement **encodés en base64**, ce qui n'est **pas** un chiffrement : `manifests/secret.yaml` (URL de base de données avec mot de passe), `manifests/timescaledb-secret.yaml`, `docker-compose.yaml`. Le même mot de passe (19 caractères) apparaît aussi dans la source de données Grafana du commit `d8f23c2`.
-  - Vérifié : ce mot de passe n'est **réutilisé nulle part** dans la pile actuelle (`.env`, `.secrets/`, fichiers de travail).
-  - Risque : s'il sert ailleurs (autre base, autre service), il est **compromis**. **Rotation recommandée** (REQUIRES USER ACTION). Aucune réécriture d'historique ni force-push n'a été faite.
+- **Ancien mot de passe de développement** (analyse du 30/09/2026, valeur jamais affichée) :
+  - **Ce que c'était** : le mot de passe de l'utilisateur PostgreSQL/TimescaleDB `finops` (base `finops_greenit`) du MVP.
+  - **Où il apparaît** (introduit par `bb6052c`, puis `d8f23c2`) :
+    - `docker-compose.yaml` (`POSTGRES_PASSWORD`) ;
+    - `manifests/timescaledb-secret.yaml` (base64, qui n'est **pas** un chiffrement) ;
+    - `manifests/secret.yaml` (`DATABASE_URL` en base64) ;
+    - `app/config.py` (valeur par défaut de `DATABASE_URL`) ;
+    - `.env.example` ;
+    - `grafana/provisioning/datasources/datasources.yml` (source de données TimescaleDB de Grafana) ;
+    - `scripts/smoke_test.ps1`.
+  - **Encore présent** : dans l'historique, **et dans l'état actuel de `main`** (`22d2912`) tant que la branche `feature/v1-multicluster-workloads` n'est pas fusionnée. Une fusion simulée donne **0 fichier** contenant la valeur.
+  - **Inactif** : absent de la branche, des fichiers de travail, de `.env` / `.secrets/`, des variables des conteneurs, des Secrets Kubernetes des 2 clusters et de la configuration Grafana en service. **Refusé** par la TimescaleDB en service (test d'authentification réseau : `InvalidPasswordError` ; témoins : un mot de passe aléatoire est refusé, le mot de passe actuel est accepté).
+  - **Exposition** : le dépôt GitHub est **privé** (3 collaborateurs). Le risque est limité à ces accès, et à toute réutilisation de ce mot de passe hors de ce projet ; ne pas le réutiliser, et le changer partout où il aurait servi ailleurs.
+  - Historique non réécrit, aucun force-push.
 - **Index Git (corrigé le 30/09 avant le commit)** : l'index contenait les renommages `secret.yaml → secret.example.yaml` et `timescaledb-secret.yaml → timescaledb-secret.example.yaml` **avec l'ancien contenu** (les vraies valeurs). Ils ont été réindexés depuis l'arbre de travail assaini, et le contenu indexé a été vérifié (placeholders uniquement). `prometheus/prometheus.yml` est supprimé volontairement : remplacé en V1 par `prometheus-primary.yml` / `prometheus-secondary.yml`.
 - Fichiers de travail : aucune valeur secrète en clair (recherche des valeurs réelles de `.secrets/` dans tous les fichiers suivis et non suivis). `.env`, `.secrets/`, `.gitops-work/` et `.demo/` sont ignorés par Git.
 
@@ -120,7 +131,7 @@ Ce qui reste **non vérifié** :
 | 19 | réglages inutilisés | ✅ supprimés ou branchés (logging) |
 | 20 | pas de dashboard | ✅ 5 dashboards, affichés avec données réelles (V2) |
 | 21 | pas de README ni de CI | ✅ README + workflow (rejoué avec `act`, pas encore sur GitHub) |
-| 22 | secrets de dev dans Git | ⚠️ PARTIAL : arbre de travail assaini (`*.example.yaml`, `.env` requis) ; **historique public (`bb6052c`) non assaini** (index corrigé) → §2 quater |
+| 22 | secrets de dev dans Git | ⚠️ PARTIAL : arbre de travail assaini (`*.example.yaml`, `.env` requis) ; **historique (`bb6052c`, dépôt privé) non réécrit** ; valeur inactive, retirée de `main` à la fusion (index corrigé) → §2 quater |
 | 23 | tests en double | ⚠️ conservés (règle : ne pas supprimer de tests) |
 | 24 | smoke test PowerShell | ⚠️ conservé ; `run_local_demo.sh` ajouté pour Linux/macOS |
 
