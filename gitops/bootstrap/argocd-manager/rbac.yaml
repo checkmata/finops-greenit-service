@@ -1,0 +1,67 @@
+# Identity used by Argo CD (on the hub) to manage a REMOTE cluster (primary).
+# Least privilege instead of `argocd cluster add`'s cluster-admin:
+#  - `admin` (built-in, namespaced) in the managed namespaces only;
+#  - cluster scope: read namespaces, patch only the managed ones.
+# Argo CD is restricted accordingly (cluster Secret `namespaces` + resource.inclusions).
+# Applied by scripts/gitops/register-clusters.sh — a permission grant, run by a human.
+apiVersion: v1
+kind: Namespace
+metadata: {name: finops-system}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: argocd-manager, namespace: finops-system}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: argocd-manager-token
+  namespace: finops-system
+  annotations: {kubernetes.io/service-account.name: argocd-manager}
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: finops-argocd-manager-namespaces}
+rules:
+  - {apiGroups: [""], resources: [namespaces], verbs: [get, list, watch]}
+  - apiGroups: [""]
+    resources: [namespaces]
+    resourceNames: [banking, ecommerce, trading, monitoring, finops-system]
+    verbs: [patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: finops-argocd-manager-namespaces}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: finops-argocd-manager-namespaces}
+subjects: [{kind: ServiceAccount, name: argocd-manager, namespace: finops-system}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: argocd-manager, namespace: banking}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: admin}
+subjects: [{kind: ServiceAccount, name: argocd-manager, namespace: finops-system}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: argocd-manager, namespace: ecommerce}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: admin}
+subjects: [{kind: ServiceAccount, name: argocd-manager, namespace: finops-system}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: argocd-manager, namespace: trading}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: admin}
+subjects: [{kind: ServiceAccount, name: argocd-manager, namespace: finops-system}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: argocd-manager, namespace: monitoring}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: admin}
+subjects: [{kind: ServiceAccount, name: argocd-manager, namespace: finops-system}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: argocd-manager, namespace: finops-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: admin}
+subjects: [{kind: ServiceAccount, name: argocd-manager, namespace: finops-system}]

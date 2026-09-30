@@ -2,3 +2,6 @@
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "infra: needs REAL infrastructure (Prometheus, TimescaleDB, running API); skipped unless INFRA_* env vars are set",
+]

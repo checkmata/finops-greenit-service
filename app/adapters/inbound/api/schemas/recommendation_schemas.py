@@ -27,6 +27,7 @@ from app.domain.models.recommendation import (
     Recommendation,
     RecommendationSet,
     Severity,
+    StoredRecommendation,
 )
 from app.ports.storage_port import MetricSnapshot
 
@@ -150,6 +151,17 @@ class RecommendationResponse(BaseModel):
         description="When the status was last updated (UTC)",
     )
 
+    # --- V1: lifecycle + scope + provenance ---
+    status: str | None = Field(None, description="pending | approved | rejected | executed | failed")
+    cluster: str = Field("default", description="Cluster the advice applies to")
+    workload: str = Field("*", description="Workload (app label); '*' = namespace level")
+    team: str = Field("unknown", description="Team attribution label")
+    cost_center: str = Field("unknown", description="Cost center attribution label")
+    environment: str = Field("unknown", description="Environment label")
+    estimation_method: str | None = Field(
+        None, description="Set when figures are estimates (e.g. node-level energy fallback)"
+    )
+
 
 # =============================================================================
 # Response schemas — RecommendationSet
@@ -221,17 +233,27 @@ class SnapshotPointResponse(BaseModel):
     cost_center: str = Field(..., description="Cost center attribution label")
     environment: str = Field(..., description="Environment (production, staging, etc.)")
 
-    cpu_core_hours: float = Field(..., description="CPU usage in core-hours", ge=0.0)
-    memory_gb_hours: float = Field(..., description="Memory usage in GB-hours", ge=0.0)
-    cost_usd: float = Field(..., description="Estimated cost in USD", ge=0.0)
-    energy_kwh: float = Field(..., description="Energy consumption in kWh", ge=0.0)
-    co2e_kg: float = Field(..., description="Carbon emissions in kgCO2e", ge=0.0)
+    cpu_core_hours: float = Field(..., description="Average CPU cores used (historical field name)", ge=0.0)
+    memory_gb_hours: float = Field(..., description="Working-set memory in GB (historical field name)", ge=0.0)
+    cost_usd: float = Field(..., description="Estimated monthly cost of USED resources (USD)", ge=0.0)
+    energy_kwh: float | None = Field(None, description="Energy over 24 h in kWh (null = not measurable)", ge=0.0)
+    co2e_kg: float | None = Field(None, description="Carbon emissions in kgCO2e (null = not measurable)", ge=0.0)
     waste_pct: float = Field(
         ...,
-        description="Percentage of resources wasted (idle/over-provisioned)",
+        description="Cost waste ratio × 100 (reserved but unused)",
         ge=0.0,
         le=100.0,
     )
+
+    # --- V1 ---
+    cluster: str = Field("default", description="Cluster")
+    requested_cost_usd: float = Field(0.0, description="Monthly cost of REQUESTED resources (USD)")
+    waste_cost_usd: float = Field(0.0, description="Monthly cost reserved but unused (USD)")
+    potential_savings_usd: float = Field(0.0, description="Σ savings of this cycle's right-sizing advice")
+    storage_cost_usd: float | None = Field(None, description="Storage part of cost_usd (null = unavailable)")
+    storage_status: str = Field("unavailable", description="available | partial | unavailable | not_applicable")
+    idle_energy_kwh: float | None = Field(None, description="Idle energy (null = not measurable)")
+    energy_attribution: str = Field("unavailable", description="container | pod | node_cpu_share | unavailable")
 
 
 class HistoricalSnapshotResponse(BaseModel):
@@ -286,7 +308,23 @@ def recommendation_to_response(rec: Recommendation, rec_id: UUID) -> Recommendat
         estimated_savings_kg_co2=rec.estimated_savings_kg_co2,
         created_at=rec.timestamp or datetime.now(),
         updated_at=datetime.now(),
+        cluster=rec.cluster,
+        workload=rec.workload,
+        team=rec.team,
+        cost_center=rec.cost_center,
+        environment=rec.environment,
+        estimation_method=rec.estimation_method,
     )
+
+
+def stored_recommendation_to_response(stored: StoredRecommendation) -> RecommendationResponse:
+    """V1: real id, status and timestamps from storage (MVP used UUID(int=i))."""
+    base = recommendation_to_response(stored.recommendation, stored.id)
+    return base.model_copy(update={
+        "status": stored.status,
+        "created_at": stored.created_at,
+        "updated_at": stored.updated_at,
+    })
 
 
 def recommendation_set_to_response(
@@ -330,6 +368,14 @@ def snapshot_to_response(snapshot: MetricSnapshot) -> SnapshotPointResponse:
         energy_kwh=snapshot.energy_kwh,
         co2e_kg=snapshot.co2e_kg,
         waste_pct=snapshot.waste_pct,
+        cluster=snapshot.cluster,
+        requested_cost_usd=snapshot.requested_cost_usd,
+        waste_cost_usd=snapshot.waste_cost_usd,
+        potential_savings_usd=snapshot.potential_savings_usd,
+        storage_cost_usd=snapshot.storage_cost_usd,
+        storage_status=snapshot.storage_status,
+        idle_energy_kwh=snapshot.idle_energy_kwh,
+        energy_attribution=snapshot.energy_attribution,
     )
 
 

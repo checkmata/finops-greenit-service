@@ -63,6 +63,8 @@ WORKDIR /app
 
 # Copy application code (after deps, for better layer caching)
 COPY app/ ./app/
+# V1: example multicluster configs (select one with CLUSTERS_CONFIG_FILE)
+COPY config/ ./config/
 
 # Ensure the migration files are available (TimescaleDB init)
 # Mounted read-only into TimescaleDB container via docker-entrypoint-initdb.d
@@ -74,9 +76,10 @@ COPY app/adapters/outbound/db/migrations/ /app/migrations/
 
 EXPOSE 8080
 
-# Health check — matches /health endpoint that checks Prometheus + DB
+# Liveness only (V1): /health/live never depends on Prometheus/DB — restarting
+# this container would not fix an external dependency. Readiness = /health.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
+    CMD curl -f http://localhost:8080/health/live || exit 1
 
 # Run with uvicorn — single worker for the MVP scheduler (shares event loop)
 CMD ["uvicorn", "app.adapters.inbound.api.main:app", \

@@ -1,0 +1,19 @@
+# kind cluster "secondary" (V2, EXECUTED). One node = one Docker container on the host.
+# - /usr/src: Kepler's chart mounts it as a hostPath (kernel headers); with the
+#   host's BTF it is not strictly needed, but the mount must exist.
+# - NodePort 30090 (Prometheus) published on the host as 19091 for operators.
+#   The management plane reaches it on the Docker "kind" network instead:
+#   http://secondary-control-plane:30090
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: secondary
+nodes:
+  - role: control-plane
+    extraMounts:
+      - hostPath: /usr/src
+        containerPath: /usr/src
+        readOnly: true
+    extraPortMappings:
+      - containerPort: 30090
+        hostPort: 19091
+        protocol: TCP

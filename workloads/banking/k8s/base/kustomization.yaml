@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - txn-processor.yaml
+  - fraud-scorer.yaml
+  - pvc.yaml
+  - ledger-db.yaml

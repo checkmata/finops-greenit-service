@@ -1,0 +1,23 @@
+# OCM placement: WHICH clusters receive WHAT. Clusters are labelled by role
+# (`finops.io/role=primary|secondary`, set by scripts/gitops/ocm-up.sh).
+apiVersion: cluster.open-cluster-management.io/v1beta2
+kind: ManagedClusterSetBinding
+metadata:
+  name: default
+  namespace: argocd
+spec:
+  clusterSet: default
+---
+# Every workload cluster (primary active + secondary standby).
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: workload-clusters
+  namespace: argocd
+spec:
+  clusterSets: [default]
+  predicates:
+    - requiredClusterSelector:
+        labelSelector:
+          matchExpressions:
+            - {key: finops.io/role, operator: In, values: [primary, secondary]}

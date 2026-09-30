@@ -1,0 +1,58 @@
+# CI (V1): tests + coverage gate, manifest validation, image builds.
+# Written in V1; it runs on GitHub-hosted runners (not executed locally).
+name: ci
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - name: Unit + integration tests + coverage gate (real-infrastructure tests are marked `infra`)
+        run: pytest -q -m "not infra" --cov=app --cov=exporter --cov=workloads --cov-report=term-missing --cov-fail-under=85
+      - name: Dashboards are up to date with their generator
+        run: |
+          python scripts/generate_grafana_dashboards.py
+          git diff --exit-code grafana/dashboards/
+
+  manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kubeconform + kustomize
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
+          curl -sSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz" | tar xz kustomize
+      - name: Validate OpenShift manifests (CRDs such as Route/ServiceMonitor are skipped)
+        run: ./kubeconform -summary -ignore-missing-schemas manifests/*.yaml
+      - name: Build and validate every workload overlay
+        run: |
+          for o in workloads/*/k8s/overlays/*; do
+            echo "== $o"; ./kustomize build "$o" | ./kubeconform -summary -ignore-missing-schemas -
+          done
+      - name: Build and validate the GitOps tree (V2.x; syntax only — the real validation is docs/GITOPS.md)
+        run: |
+          for o in gitops/platform/overlays/*; do
+            echo "== $o"; ./kustomize build --load-restrictor LoadRestrictionsNone "$o" | ./kubeconform -summary -ignore-missing-schemas -
+          done
+          ./kubeconform -summary -ignore-missing-schemas gitops/apps/*.yaml gitops/bootstrap/ocm/*.yaml gitops/bootstrap/argocd-manager/*.yaml
+
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t finops-greenit-service:ci .
+      - run: docker build -t finops-sim:ci ./exporter
+      - run: docker build -t finops-demo/banking:ci ./workloads/banking
+      - run: docker build -t finops-demo/trading:ci ./workloads/trading
+      - name: Compose file is valid (needs a .env)
+        run: cp .env.example .env && docker compose config -q

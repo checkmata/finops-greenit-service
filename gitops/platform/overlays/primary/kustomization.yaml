@@ -1,0 +1,7 @@
+# Active cluster: no in-cluster FinOps component today (the service runs outside,
+# in docker compose, and reads Prometheus directly). Declared explicitly so the
+# difference with the standby is visible in Git rather than implicit.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml

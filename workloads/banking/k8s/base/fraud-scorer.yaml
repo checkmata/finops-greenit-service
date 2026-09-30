@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fraud-scorer
+  namespace: banking
+  labels: {app: fraud-scorer, app.kubernetes.io/part-of: banking}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: fraud-scorer}
+  template:
+    metadata:
+      labels:
+        app: fraud-scorer
+        # Attribution labels read by the service through kube_pod_labels
+        # (kube-state-metrics must allow-list them: see scripts/k8s/values-kube-prometheus-stack.yaml)
+        team: payments
+        cost-center: cc-banking
+        environment: prod
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      securityContext: {runAsNonRoot: true}
+      containers:
+        - name: fraud-scorer
+          image: finops-demo/banking:local
+          imagePullPolicy: IfNotPresent
+          ports: [{containerPort: 8080, name: metrics}]
+          env:
+            - name: TPS
+              value: "80"
+            - name: WORK_ROUNDS
+              value: "1500"
+          resources:
+            requests: {cpu: "500m", memory: "512Mi"}
+            limits: {memory: "512Mi"}

@@ -1,0 +1,10 @@
+# REAL clusters (V2): two minikube/KVM Kubernetes clusters, each with its own
+# kube-prometheus-stack exposed on NodePort 30090. URLs come from the
+# environment (set in .env or the Kubernetes Secret/ConfigMap) — see docs/MULTICLUSTER.md.
+clusters:
+  - name: primary
+    role: primary
+    prometheus_url: ${PROMETHEUS_PRIMARY_URL}
+  - name: secondary
+    role: secondary
+    prometheus_url: ${PROMETHEUS_SECONDARY_URL}

@@ -74,3 +74,35 @@ data:
   #   - OpenShift collects logs via Fluentd/Fluent Bit
   #   - JSON is machine-parseable (no regex needed)
   #   - Structured fields enable filtering in Kibana/Grafana Loki
+
+  # --- V1: multicluster + scheduler ---
+  CLUSTER_NAME: "primary"
+  CLUSTERS_CONFIG_FILE: "/app/config/runtime/clusters.yaml"
+  SCHEDULER_INTERVAL_SECONDS: "300"
+  SCHEDULER_NAMESPACES: ""            # empty = discover from Prometheus
+  NAMESPACE_EXCLUDE_REGEX: "^(kube-.*|openshift.*|kepler)$"
+  WORKLOAD_LABEL: "app"               # must be allow-listed in kube-state-metrics
+  MIN_OBSERVATION_HOURS: "168"        # 7 days of CPU history before right-sizing
+---
+# Observed clusters. In a real fleet each entry points to that cluster's
+# Prometheus/Thanos Querier route (auth to be added: bearer token — see
+# docs/MULTICLUSTER.md). URLs below are placeholders.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: finops-greenit-clusters
+  namespace: finops-greenit
+  labels:
+    app.kubernetes.io/name: finops-greenit-service
+    app.kubernetes.io/part-of: finops-greenit
+    app.kubernetes.io/component: config
+data:
+  clusters.yaml: |
+    clusters:
+      - name: primary
+        role: primary
+        prometheus_url: http://prometheus-operated.monitoring.svc.cluster.local:9090
+      - name: secondary
+        role: secondary
+        prometheus_url: https://thanos-querier-openshift-monitoring.apps.SECONDARY_CLUSTER_DOMAIN
+

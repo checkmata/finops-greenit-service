@@ -1,0 +1,10 @@
+# Local multicluster SIMULATION (docker-compose / scripts/run_local_demo.sh).
+# Two "clusters" = two independent Prometheus instances, each scraping its own
+# simulated exporter. This is NOT a real Kubernetes multicluster (see docs/MULTICLUSTER.md).
+clusters:
+  - name: primary
+    role: primary
+    prometheus_url: http://localhost:9090
+  - name: secondary
+    role: secondary
+    prometheus_url: http://localhost:9091

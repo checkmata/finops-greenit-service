@@ -28,6 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from app.domain.models.data_quality import MetricStatus
 from app.domain.models.pod_metric import PodMetric, StorageMetric
 from app.domain.models.recommendation import (
     Category,
@@ -63,6 +64,10 @@ class CostBreakdown:
     cost_per_gb_hour: float
     cost_per_gb_month: float
     timestamp: datetime
+
+    # V1: whether storage_cost_usd reflects real PVC measurements.
+    # UNAVAILABLE means "storage not priced", NOT "storage costs nothing".
+    storage_status: MetricStatus = MetricStatus.UNAVAILABLE
 
 
 @dataclass(frozen=True)
@@ -121,6 +126,13 @@ class NamespaceCostSummary:
     waste_ratio: float
     timestamp: datetime
 
+    # --- V1: waste attributed per resource (all >= 0) ---
+    # wasted_cost_usd == cpu + memory + storage components (see calculate_namespace_waste)
+    cpu_waste_usd: float = 0.0
+    memory_waste_usd: float = 0.0
+    storage_waste_usd: float = 0.0
+    storage_status: MetricStatus = MetricStatus.UNAVAILABLE
+
 
 # ---------------------------------------------------------------------------
 # Core calculation functions — pure math, no I/O
@@ -128,6 +140,50 @@ class NamespaceCostSummary:
 
 BYTES_PER_GB = 1024 ** 3  # 1,073,741,824
 HOURS_PER_MONTH = 24 * 30  # 720 hours in a 30-day month
+
+
+def storage_status(storage_metrics: list[StorageMetric] | None) -> MetricStatus:
+    """
+    How trustworthy the storage part of a cost is.
+
+    - None                         → UNAVAILABLE (not fetched / query failed)
+    - []                           → NOT_APPLICABLE (namespace has no PVC: 0 is true)
+    - every PVC has kubelet stats  → AVAILABLE
+    - some / none have stats       → PARTIAL / UNAVAILABLE
+    """
+    if storage_metrics is None:
+        return MetricStatus.UNAVAILABLE
+    if not storage_metrics:
+        return MetricStatus.NOT_APPLICABLE
+    with_stats = sum(1 for s in storage_metrics if s.has_usage_stats)
+    if with_stats == len(storage_metrics):
+        return MetricStatus.AVAILABLE
+    return MetricStatus.PARTIAL if with_stats else MetricStatus.UNAVAILABLE
+
+
+def _priced_pvcs(storage_metrics: list[StorageMetric] | None) -> list[StorageMetric]:
+    """Only PVCs with real kubelet stats are priced (never price a placeholder 0)."""
+    return [s for s in (storage_metrics or []) if s.has_usage_stats]
+
+
+def rightsizing_savings_usd(
+    current_request: float,
+    recommended_request: float,
+    price_per_unit_hour: float,
+) -> float:
+    """
+    Monthly saving of changing a request from `current` to `recommended`.
+
+    WHY this formula (V1 fix for double counting):
+    - The MVP computed each saving as `total_waste × (1 − ratio)` using the
+      TOTAL namespace waste for both CPU and memory, so CPU + memory savings
+      could exceed the total waste.
+    - The saving of an action is exactly what stops being reserved:
+      (current − recommended) × price × 720 h. Because recommended ≥ usage
+      (we add headroom), it is always ≤ that resource's own waste component,
+      hence Σ savings ≤ Σ components = total waste.
+    """
+    return round(max(0.0, current_request - recommended_request) * price_per_unit_hour * HOURS_PER_MONTH, 4)
 
 
 def calculate_monthly_cost(
@@ -155,10 +211,8 @@ def calculate_monthly_cost(
     memory_gb = pod.memory_bytes / BYTES_PER_GB
     memory_cost = memory_gb * cost_per_gb_hour * HOURS_PER_MONTH
 
-    storage_cost = 0.0
-    if storage_metrics:
-        total_used_gb = sum(s.used_bytes for s in storage_metrics) / BYTES_PER_GB
-        storage_cost = total_used_gb * cost_per_gb_month
+    priced = _priced_pvcs(storage_metrics)
+    storage_cost = sum(s.used_bytes for s in priced) / BYTES_PER_GB * cost_per_gb_month
 
     total = cpu_cost + memory_cost + storage_cost
 
@@ -172,6 +226,7 @@ def calculate_monthly_cost(
         cost_per_gb_hour=cost_per_gb_hour,
         cost_per_gb_month=cost_per_gb_month,
         timestamp=pod.timestamp,
+        storage_status=storage_status(storage_metrics),
     )
 
 
@@ -199,10 +254,8 @@ def calculate_requested_cost(
     memory_gb = pod.memory_requested / BYTES_PER_GB
     memory_cost = memory_gb * cost_per_gb_hour * HOURS_PER_MONTH
 
-    storage_cost = 0.0
-    if storage_metrics:
-        total_capacity_gb = sum(s.capacity_bytes for s in storage_metrics) / BYTES_PER_GB
-        storage_cost = total_capacity_gb * cost_per_gb_month
+    priced = _priced_pvcs(storage_metrics)
+    storage_cost = sum(s.capacity_bytes for s in priced) / BYTES_PER_GB * cost_per_gb_month
 
     total = cpu_cost + memory_cost + storage_cost
 
@@ -216,6 +269,7 @@ def calculate_requested_cost(
         cost_per_gb_hour=cost_per_gb_hour,
         cost_per_gb_month=cost_per_gb_month,
         timestamp=pod.timestamp,
+        storage_status=storage_status(storage_metrics),
     )
 
 
@@ -255,11 +309,19 @@ def calculate_namespace_waste(
     """
     Calculate total waste for a namespace: the gap between requested and actual cost.
 
-    Formula:
-        wasted = requested_cost - actual_cost
-        waste_ratio = wasted / requested_cost (0.0 = no waste, 1.0 = 100% waste)
+    Formula (V1 — per-component, gross waste):
+        cpu_waste     = max(0, requested_cpu_cost     − actual_cpu_cost)
+        memory_waste  = max(0, requested_memory_cost  − actual_memory_cost)
+        storage_waste = max(0, capacity_storage_cost  − used_storage_cost)
+        wasted        = cpu_waste + memory_waste + storage_waste
+        waste_ratio   = wasted / requested_cost (0.0 = no waste, 1.0 = 100% waste)
 
-    WHY: Gives a single number for "how much money are we throwing away?"
+    WHY gross (sum of positive gaps) instead of requested − actual:
+    - Unused reserved CPU is paid for even if memory is over-used; an
+      under-provisioned resource must not "cancel" waste on another one.
+    - It makes the waste decomposable, which bounds recommendation savings
+      (Σ savings ≤ wasted). When no resource is under-provisioned both
+      definitions give the same number.
     """
     requested = calculate_requested_cost(
         pod, cost_per_core_hour, cost_per_gb_hour, cost_per_gb_month, storage_metrics
@@ -267,8 +329,19 @@ def calculate_namespace_waste(
     actual = calculate_monthly_cost(
         pod, cost_per_core_hour, cost_per_gb_hour, cost_per_gb_month, storage_metrics
     )
+    return summarize_waste(pod, requested, actual)
 
-    wasted = requested.total_cost_usd - actual.total_cost_usd
+
+def summarize_waste(
+    pod: PodMetric,
+    requested: CostBreakdown,
+    actual: CostBreakdown,
+) -> NamespaceCostSummary:
+    """Build the per-component waste summary from two cost breakdowns."""
+    cpu_waste = max(0.0, requested.cpu_cost_usd - actual.cpu_cost_usd)
+    memory_waste = max(0.0, requested.memory_cost_usd - actual.memory_cost_usd)
+    storage_waste = max(0.0, requested.storage_cost_usd - actual.storage_cost_usd)
+    wasted = cpu_waste + memory_waste + storage_waste
     waste_ratio = (wasted / requested.total_cost_usd) if requested.total_cost_usd > 0 else 0.0
 
     return NamespaceCostSummary(
@@ -278,6 +351,10 @@ def calculate_namespace_waste(
         wasted_cost_usd=round(wasted, 4),
         waste_ratio=round(waste_ratio, 4),
         timestamp=pod.timestamp,
+        cpu_waste_usd=round(cpu_waste, 4),
+        memory_waste_usd=round(memory_waste, 4),
+        storage_waste_usd=round(storage_waste, 4),
+        storage_status=requested.storage_status,
     )
 
 
@@ -311,11 +388,11 @@ def generate_recommendations(
 
         # Over-provisioned CPU
         if ratio.is_overprovisioned_cpu:
-            recommendations.append(_cpu_rightsize_recommendation(pod, ratio, waste))
+            recommendations.append(_cpu_rightsize_recommendation(pod, ratio, waste, cost_per_core_hour))
 
         # Over-provisioned memory
         if ratio.is_overprovisioned_memory:
-            recommendations.append(_memory_rightsize_recommendation(pod, ratio, waste))
+            recommendations.append(_memory_rightsize_recommendation(pod, ratio, waste, cost_per_gb_hour))
 
         # Under-provisioned CPU (throttling risk)
         if ratio.is_underprovisioned_cpu:
@@ -340,6 +417,7 @@ def _cpu_rightsize_recommendation(
     pod: PodMetric,
     ratio: OverprovisioningRatio,
     waste: NamespaceCostSummary,
+    cost_per_core_hour: float,
 ) -> Recommendation:
     """
     Recommendation: reduce CPU request to match actual usage.
@@ -359,7 +437,9 @@ def _cpu_rightsize_recommendation(
         ),
         current_value=f"{pod.cpu_requested}",
         recommended_value=f"{recommended_cores}",
-        estimated_savings_usd=round(waste.wasted_cost_usd * (1 - ratio.cpu_ratio), 4),
+        estimated_savings_usd=rightsizing_savings_usd(
+            pod.cpu_requested, recommended_cores, cost_per_core_hour
+        ),
         timestamp=pod.timestamp,
     )
 
@@ -368,6 +448,7 @@ def _memory_rightsize_recommendation(
     pod: PodMetric,
     ratio: OverprovisioningRatio,
     waste: NamespaceCostSummary,
+    cost_per_gb_hour: float,
 ) -> Recommendation:
     """
     Recommendation: reduce memory request to match actual usage.
@@ -386,7 +467,9 @@ def _memory_rightsize_recommendation(
         ),
         current_value=f"{pod.memory_requested / BYTES_PER_GB:.1f}",
         recommended_value=f"{recommended_bytes / BYTES_PER_GB:.1f}",
-        estimated_savings_usd=round(waste.wasted_cost_usd * (1 - ratio.memory_ratio), 4),
+        estimated_savings_usd=rightsizing_savings_usd(
+            pod.memory_requested / BYTES_PER_GB, recommended_bytes / BYTES_PER_GB, cost_per_gb_hour
+        ),
         timestamp=pod.timestamp,
     )
 

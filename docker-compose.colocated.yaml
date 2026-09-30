@@ -1,0 +1,31 @@
+# Override for when the management plane runs ON a node of a monitored cluster
+# (V2 real setup: Docker daemon of the secondary minikube VM).
+#
+#   docker compose -f docker-compose.yaml -f docker-compose.colocated.yaml up -d
+#
+# WHY: from a Compose user-defined bridge, a container cannot reach the NodePort
+# of the very node it runs on (hairpin dropped by the Kubernetes/cri-dockerd
+# iptables rules — observed: TimeoutError to the local NodePort, 200 to the other
+# VM). Host networking avoids the hairpin. TimescaleDB stays on the bridge and is
+# published on the node (localhost:5432).
+services:
+  api:
+    network_mode: host
+    ports: !reset []
+    environment:
+      DATABASE_URL: postgresql://finops:${POSTGRES_PASSWORD}@127.0.0.1:5432/finops_greenit
+      API_PORT: "8080"
+    command: ["uvicorn", "app.adapters.inbound.api.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
+  # Second replica of the SAME image (HA / leader-election test). Different port
+  # because both share the node network.
+  api-2:
+    extends: {service: api}
+    network_mode: host
+    ports: !reset []
+    command: ["uvicorn", "app.adapters.inbound.api.main:app", "--host", "0.0.0.0", "--port", "8081", "--workers", "1"]
+    profiles: [ha]
+  grafana:
+    network_mode: host
+    ports: !reset []
+    environment:
+      TIMESCALEDB_HOST: 127.0.0.1

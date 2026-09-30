@@ -1,0 +1,464 @@
+{
+  "uid": "finops-cost",
+  "title": "FinOps/GreenIT \u2014 2. FinOps",
+  "description": "Cost estimates from TimescaleDB history (per cluster / namespace / workload).",
+  "tags": [
+    "finops-greenit"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "cluster",
+        "type": "query",
+        "datasource": {
+          "type": "postgres",
+          "uid": "timescaledb"
+        },
+        "query": "SELECT DISTINCT cluster FROM metric_snapshots ORDER BY 1",
+        "definition": "SELECT DISTINCT cluster FROM metric_snapshots ORDER BY 1",
+        "multi": true,
+        "includeAll": true,
+        "allValue": null,
+        "refresh": 2,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "namespace",
+        "type": "query",
+        "datasource": {
+          "type": "postgres",
+          "uid": "timescaledb"
+        },
+        "query": "SELECT DISTINCT namespace FROM metric_snapshots WHERE cluster IN ($cluster) ORDER BY 1",
+        "definition": "SELECT DISTINCT namespace FROM metric_snapshots WHERE cluster IN ($cluster) ORDER BY 1",
+        "multi": true,
+        "includeAll": true,
+        "allValue": null,
+        "refresh": 2,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 9,
+      "title": "Monthly cost \u2014 used resources",
+      "type": "stat",
+      "description": "Estimate: quantity \u00d7 configured price \u00d7 720 h. Not an invoice.",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "rawSql": "SELECT SUM(cost_usd) FROM (SELECT DISTINCT ON (cluster, namespace) * FROM metric_snapshots\n   WHERE $__timeFilter(time) AND cluster IN ($cluster) AND namespace IN ($namespace) ORDER BY cluster, namespace, time DESC) l",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "custom": {},
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 10,
+      "title": "Monthly cost \u2014 requested resources",
+      "type": "stat",
+      "description": "",
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "rawSql": "SELECT SUM(requested_cost_usd) FROM (SELECT DISTINCT ON (cluster, namespace) * FROM metric_snapshots\n   WHERE $__timeFilter(time) AND cluster IN ($cluster) AND namespace IN ($namespace) ORDER BY cluster, namespace, time DESC) l",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "custom": {},
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 11,
+      "title": "Waste (reserved, unused)",
+      "type": "stat",
+      "description": "",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "rawSql": "SELECT SUM(waste_cost_usd) FROM (SELECT DISTINCT ON (cluster, namespace) * FROM metric_snapshots\n   WHERE $__timeFilter(time) AND cluster IN ($cluster) AND namespace IN ($namespace) ORDER BY cluster, namespace, time DESC) l",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "custom": {},
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 12,
+      "title": "Potential savings (right-sizing)",
+      "type": "stat",
+      "description": "\u03a3 savings of current advice; always \u2264 waste (V1 fix of double counting).",
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "rawSql": "SELECT SUM(potential_savings_usd) FROM (SELECT DISTINCT ON (cluster, namespace) * FROM metric_snapshots\n   WHERE $__timeFilter(time) AND cluster IN ($cluster) AND namespace IN ($namespace) ORDER BY cluster, namespace, time DESC) l",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "custom": {},
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 13,
+      "title": "Used cost over time, by cluster",
+      "type": "timeseries",
+      "description": "",
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "rawSql": "SELECT bucket AS time, cluster AS metric, SUM(v) AS value FROM (\n  SELECT time_bucket('$__interval'::interval, time) AS bucket, cluster, namespace, AVG(cost_usd) AS v\n  FROM metric_snapshots WHERE $__timeFilter(time) AND cluster IN ($cluster) AND namespace IN ($namespace) AND cost_usd IS NOT NULL\n  GROUP BY 1, 2, 3) s\nGROUP BY 1, 2 ORDER BY 1",
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "title": "Waste over time, by namespace",
+      "type": "timeseries",
+      "description": "",
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "rawSql": "SELECT bucket AS time, cluster || '/' || namespace AS metric, SUM(v) AS value FROM (\n  SELECT time_bucket('$__interval'::interval, time) AS bucket, cluster, namespace, AVG(waste_cost_usd) AS v\n  FROM metric_snapshots WHERE $__timeFilter(time) AND cluster IN ($cluster) AND namespace IN ($namespace) AND waste_cost_usd IS NOT NULL\n  GROUP BY 1, 2, 3) s\nGROUP BY 1, 2 ORDER BY 1",
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "title": "Savings over time, by namespace",
+      "type": "timeseries",
+      "description": "",
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "rawSql": "SELECT bucket AS time, cluster || '/' || namespace AS metric, SUM(v) AS value FROM (\n  SELECT time_bucket('$__interval'::interval, time) AS bucket, cluster, namespace, AVG(potential_savings_usd) AS v\n  FROM metric_snapshots WHERE $__timeFilter(time) AND cluster IN ($cluster) AND namespace IN ($namespace) AND potential_savings_usd IS NOT NULL\n  GROUP BY 1, 2, 3) s\nGROUP BY 1, 2 ORDER BY 1",
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "title": "Storage status",
+      "type": "table",
+      "description": "'unavailable' = not priced (no kubelet stats) \u2014 it does NOT mean free.",
+      "gridPos": {
+        "x": 12,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "rawSql": "SELECT cluster, namespace, storage_status, storage_cost_usd FROM (SELECT DISTINCT ON (cluster, namespace) * FROM metric_snapshots\n   WHERE $__timeFilter(time) AND cluster IN ($cluster) AND namespace IN ($namespace) ORDER BY cluster, namespace, time DESC) l ORDER BY 1, 2",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 17,
+      "title": "Workloads \u2014 latest cost view",
+      "type": "table",
+      "description": "",
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 24,
+        "h": 10
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "rawSql": "SELECT cluster, namespace, workload, team,\n  ROUND(cpu_cores_used::numeric, 3) AS cpu_used, cpu_cores_requested AS cpu_req,\n  ROUND(requested_cost_usd::numeric, 2) AS requested_usd, ROUND(actual_cost_usd::numeric, 2) AS used_usd,\n  ROUND(waste_cost_usd::numeric, 2) AS waste_usd, ROUND(potential_savings_usd::numeric, 2) AS savings_usd\nFROM (SELECT DISTINCT ON (cluster, namespace, workload) * FROM workload_snapshots\n      WHERE $__timeFilter(time) AND cluster IN ($cluster) AND namespace IN ($namespace)\n      ORDER BY cluster, namespace, workload, time DESC) w\nORDER BY waste_usd DESC",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {}
+    }
+  ]
+}

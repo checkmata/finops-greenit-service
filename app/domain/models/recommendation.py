@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from uuid import UUID
 
 
 class Category(str, Enum):
@@ -36,6 +37,8 @@ class Category(str, Enum):
     COST_RIGHTSIZING = "cost_right-sizing"
     COST_ORPHANED_PVC = "cost_orphaned_pvc"
     COST_IDLE_RESOURCE = "cost_idle_resource"
+    # V3: right-sizing from percentiles + validated forecast + variability (app.domain.ml)
+    COST_RIGHTSIZING_ML = "cost_right-sizing_ml"
 
     # Green IT categories
     ENERGY_WASTE = "energy_waste"
@@ -43,6 +46,8 @@ class Category(str, Enum):
 
     # Cross-cutting
     DATA_QUALITY = "data_quality"
+    # V3: statistically abnormal behaviour of a metric (investigate, not an action)
+    ANOMALY = "anomaly"
 
 
 class Severity(str, Enum):
@@ -105,6 +110,34 @@ class Recommendation:
     # --- metadata ---
     timestamp: datetime | None = None
 
+    # --- scope & attribution (V1) ---
+    # WHY on the domain object: the MVP stored team="unknown" for every
+    # recommendation because the domain object did not carry it. Chargeback
+    # and per-cluster dashboards need these values end to end.
+    cluster: str = "default"
+    workload: str = "*"
+    team: str = "unknown"
+    cost_center: str = "unknown"
+    environment: str = "unknown"
+
+    # --- provenance (V1) ---
+    # How the numbers behind this recommendation were obtained, e.g.
+    # "energy: node_cpu_share (estimated)". None = direct measurement.
+    estimation_method: str | None = None
+
+    @property
+    def fingerprint(self) -> str:
+        """
+        Stable identity of "the same advice about the same thing".
+
+        WHY: the scheduler runs every 5 minutes. Without a fingerprint every
+        cycle inserted a new PENDING row (~288 duplicates/day per advice).
+        Storage uses this key to refresh an open recommendation instead.
+        """
+        return "|".join(
+            (self.cluster, self.namespace, self.workload, self.category.value, self.resource)
+        )
+
 
 @dataclass(frozen=True)
 class RecommendationSet:
@@ -158,3 +191,21 @@ class RecommendationSet:
             for r in self.recommendations
             if r.estimated_savings_kg_co2 is not None
         )
+
+@dataclass(frozen=True)
+class StoredRecommendation:
+    """
+    A recommendation as persisted: the domain advice + its lifecycle state.
+
+    WHY a separate object (not fields on Recommendation):
+    - Recommendation is what the ENGINE produces (immutable advice).
+    - id/status/created_at/updated_at are assigned by storage and changed by humans.
+    - The API needs both (the MVP returned fake UUID(int=i) ids because the
+      port only returned the advice).
+    """
+
+    id: UUID
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    recommendation: Recommendation

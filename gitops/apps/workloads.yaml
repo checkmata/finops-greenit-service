@@ -1,0 +1,94 @@
+# One Argo CD Application per (workload × cluster chosen by OCM Placement).
+# Source path = the existing kustomize overlays: workloads/<app>/k8s/overlays/<cluster>.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: workloads
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - matrix:
+        generators:
+          - clusterDecisionResource:
+              configMapRef: ocm-placement-generator
+              labelSelector:
+                matchLabels:
+                  cluster.open-cluster-management.io/placement: workload-clusters
+              requeueAfterSeconds: 30
+          - list:
+              elements:
+                - app: banking
+                - app: ecommerce
+                - app: trading
+  template:
+    metadata:
+      name: '{{.app}}-{{.name}}'
+      labels: {finops.io/app: '{{.app}}', finops.io/cluster: '{{.name}}'}
+    spec:
+      project: finops
+      source:
+        repoURL: http://gitea:3000/finops/platform-gitops.git
+        targetRevision: main
+        path: 'workloads/{{.app}}/k8s/overlays/{{.name}}'
+      destination:
+        name: '{{.name}}'
+        namespace: '{{.app}}'
+      # volumeClaimTemplates[].status is written by the API server (phase: Pending) and
+      # cannot be declared: the only field ignored on every cluster.
+      ignoreDifferences:
+        - group: apps
+          kind: StatefulSet
+          jqPathExpressions: ['.spec.volumeClaimTemplates[]?.status']
+      syncPolicy:
+        automated: {prune: true, selfHeal: true}
+        syncOptions: [ServerSideApply=true, RespectIgnoreDifferences=true]
+  # On the STANDBY cluster, Deployment replicas belong to the failover controller
+  # (it scales the standby up on failover and back on failback). Everything else
+  # (images, resources, env, labels) stays owned by Git and is self-healed.
+  templatePatch: |
+    {{- if eq .name "secondary" }}
+    spec:
+      ignoreDifferences:
+        - group: apps
+          kind: StatefulSet
+          jqPathExpressions: ['.spec.volumeClaimTemplates[]?.status']
+        - group: apps
+          kind: Deployment
+          jsonPointers: [/spec/replicas]
+    {{- end }}
+---
+# FinOps platform pieces that live IN the clusters (RBAC for the service, the
+# failover actuator identity, the Prometheus auth proxy). Secrets are NOT here:
+# they are created by scripts/k8s/make-*.sh from values that never touch Git.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: finops-platform
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - clusterDecisionResource:
+        configMapRef: ocm-placement-generator
+        labelSelector:
+          matchLabels:
+            cluster.open-cluster-management.io/placement: workload-clusters
+        requeueAfterSeconds: 30
+  template:
+    metadata:
+      name: 'finops-platform-{{.name}}'
+    spec:
+      project: finops
+      source:
+        repoURL: http://gitea:3000/finops/platform-gitops.git
+        targetRevision: main
+        path: 'gitops/platform/overlays/{{.name}}'
+      destination:
+        name: '{{.name}}'
+        namespace: monitoring
+      syncPolicy:
+        automated: {prune: false, selfHeal: true}
+        syncOptions: [ServerSideApply=true]

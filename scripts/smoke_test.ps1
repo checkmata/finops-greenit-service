@@ -237,7 +237,8 @@ if (-not $SkipApi) {
     # Start uvicorn in background
     Write-Info "Starting FastAPI on port $ApiPort..."
     $env:PROMETHEUS_URL = "http://localhost:9090"
-    $env:DATABASE_URL = "postgresql://finops:finops_dev_password@localhost:5432/finops_greenit"
+    # V2: never hard-code credentials — reuse the value from .env / the environment
+    if (-not $env:DATABASE_URL) { throw "Set DATABASE_URL (see .env.example)" }
     $uvicorn = Start-Process python -ArgumentList "-m uvicorn app.adapters.inbound.api.main:app --port $ApiPort --host 127.0.0.1" `
         -PassThru -NoNewWindow -WorkingDirectory $rootDir
 

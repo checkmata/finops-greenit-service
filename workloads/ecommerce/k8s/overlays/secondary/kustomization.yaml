@@ -1,0 +1,23 @@
+# Sized for the REAL local clusters (minikube KVM VMs: primary 4 vCPU/5 GiB,
+# secondary 2 vCPU/3 GiB). Requests keep deliberate FinOps signals:
+# Warm standby: 1 replica per service, no load generator.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+# Warm standby = the browsing path only (frontend, catalog, currency, cart).
+# The rest is scaled to 0 and promoted on failover (V2 failover actuator).
+replicas:
+  - {name: loadgenerator, count: 0}
+  - {name: adservice, count: 0}
+  - {name: checkoutservice, count: 0}
+  - {name: emailservice, count: 0}
+  - {name: paymentservice, count: 0}
+  - {name: shippingservice, count: 0}
+  - {name: recommendationservice, count: 0}
+patches:
+  - target: {kind: Deployment, namespace: ecommerce}
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 50m

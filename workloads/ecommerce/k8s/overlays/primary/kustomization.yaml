@@ -1,0 +1,18 @@
+# Sized for the REAL local clusters (minikube KVM VMs: primary 4 vCPU/5 GiB,
+# secondary 2 vCPU/3 GiB). Requests keep deliberate FinOps signals:
+# Online Boutique requests are lowered to 50m CPU so 12 services fit.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+patches:
+  - target: {kind: Deployment, namespace: ecommerce}
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 50m
+  - target: {kind: Deployment, name: loadgenerator}
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env/1/value
+        value: "8"

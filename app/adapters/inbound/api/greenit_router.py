@@ -1,18 +1,15 @@
 """
-Green IT router — FastAPI endpoints for energy and carbon metrics.
+Green IT router — energy and carbon metrics.
 
 Endpoints:
-- GET /api/greenit/namespace/{namespace}  → current state (Prometheus)
-- GET /api/greenit/namespace/{namespace}/history → historical snapshots (TimescaleDB)
+- GET /api/greenit/namespace/{namespace}?cluster=  → current state (live Prometheus/Kepler)
+- GET /api/greenit/namespace/{namespace}/history    → stored snapshots (TimescaleDB)
 
-WHY dependency injection:
-- Same reasons as finops_router.py: swappable adapters, testable code.
-- The router declares what it needs (MetricsPort, StoragePort) — not which implementation.
-- FastAPI's Depends() injects the concrete adapter at runtime.
-
-WHY this is the ONLY place that "wires" ports to adapters:
-- The domain engine calls MetricsPort (interface). It never sees PrometheusAdapter.
-- The router is the composition root: it imports the concrete adapter and connects it.
+V1 changes:
+- Energy comes with its provenance (container / pod / node_cpu_share / unavailable).
+  A node-level fallback is labelled "estimated"; nothing attributable → 404,
+  never a fabricated 0 kWh.
+- Idle energy is null when not measurable (the MVP returned 0.0).
 """
 
 from __future__ import annotations
@@ -22,196 +19,148 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.adapters.inbound.api.dependencies import get_metrics_port, get_storage_port
+from app.adapters.inbound.api.schemas.greenit_schemas import (
+    carbon_footprint_to_response,
+    energy_breakdown_to_response,
+)
+from app.adapters.inbound.api.schemas.recommendation_schemas import snapshot_history_to_response
 from app.adapters.outbound.prometheus_adapter import (
-    PrometheusMetricsAdapter,
     PrometheusQueryError,
     PrometheusUnavailableError,
 )
-from app.adapters.outbound.timescale_adapter import TimescaleAdapter
 from app.config import settings
-from app.domain.greenit_engine import build_carbon_footprint, build_energy_breakdown
+from app.domain.greenit_engine import build_energy_breakdown, carbon_footprint_from_measurement
 from app.ports.metrics_port import MetricsPort
 from app.ports.storage_port import StoragePort
+
+__all__ = ["router", "get_metrics_port", "get_storage_port"]
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/greenit", tags=["greenit"])
 
 
-# =============================================================================
-# Dependency injection — FastAPI's DI system
-# =============================================================================
-
-
-def get_metrics_port() -> MetricsPort:
-    """FastAPI dependency: returns the Prometheus metrics adapter.
-
-    WHY a function (not a class):
-    - FastAPI's Depends() needs a callable
-    - This keeps adapter instantiation lazy (only when endpoint is called)
-    - Easy to override in tests: dependency_overrides[get_metrics_port] = mock
-    """
-    return PrometheusMetricsAdapter(
-        prometheus_url=settings.PROMETHEUS_URL,
-        timeout_seconds=settings.PROMETHEUS_QUERY_TIMEOUT_SECONDS,
-    )
-
-
-def get_storage_port() -> StoragePort:
-    """FastAPI dependency: returns the TimescaleDB storage adapter.
-
-    WHY a function (not a class):
-    - Same reasons as get_metrics_port()
-    - Keeps DB connection lazy (only when history endpoint is called)
-    """
-    return TimescaleAdapter(database_url=settings.DATABASE_URL)
-
-
-# =============================================================================
-# GET /api/greenit/namespace/{namespace} — current state from Prometheus
-# =============================================================================
-
-
 @router.get(
     "/namespace/{namespace}",
     summary="Get current Green IT metrics for a namespace",
-    description="Fetches live energy consumption from Kepler and computes carbon footprint.",
+    description="Live energy from Kepler (with provenance) and the derived carbon footprint.",
     response_model=None,
-    responses={
-        200: {"description": "Current carbon/energy metrics for the namespace"},
-        404: {"description": "Namespace not found (no pods with metrics)"},
-        503: {"description": "Prometheus is unreachable"},
-    },
+    responses={404: {"description": "No attributable energy"}, 503: {"description": "Prometheus unreachable"}},
 )
 async def get_namespace_carbon(
     namespace: str,
     metrics: Annotated[MetricsPort, Depends(get_metrics_port)],
 ) -> dict:
-    """Get current Green IT metrics for a Kubernetes namespace.
-
-    This endpoint queries Prometheus LIVE — it does NOT read from TimescaleDB.
-    The response includes carbon footprint computed by greenit_engine.
-
-    Args:
-        namespace: Kubernetes namespace (e.g., "team-alpha")
-        metrics: MetricsPort dependency (injected by FastAPI)
-
-    Returns:
-        JSON response with energy consumption and carbon footprint.
-
-    Raises:
-        404: No pods found with metrics for this namespace
-        503: Prometheus is unreachable
-    """
     try:
-        energy_kwh = await metrics.get_energy_kwh(namespace=namespace)
+        energy = await metrics.get_energy(namespace=namespace)
     except PrometheusUnavailableError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Prometheus is unavailable: {exc}",
-        ) from exc
+        raise HTTPException(status_code=503, detail=f"Prometheus is unavailable: {exc}") from exc
     except PrometheusQueryError as exc:
+        raise HTTPException(status_code=404, detail=f"No energy metrics found for namespace '{namespace}': {exc}") from exc
+
+    if not energy.is_available:
         raise HTTPException(
             status_code=404,
-            detail=f"No energy metrics found for namespace '{namespace}': {exc}",
-        ) from exc
+            detail=f"No energy series attributable to namespace '{namespace}' (Kepler missing or unsupported labels)",
+        )
 
-    # Get pod metrics for attribution (team, cost_center, environment)
     try:
         pod_metrics = await metrics.get_pod_metrics(namespace=namespace)
     except Exception:
         pod_metrics = []
+    first = pod_metrics[0] if pod_metrics else None
 
-    first_pod = pod_metrics[0] if pod_metrics else None
-    team = first_pod.team if first_pod else "unknown"
-    cost_center = first_pod.cost_center if first_pod else "unknown"
-    environment = first_pod.environment if first_pod else "unknown"
-
-    # Build domain objects using greenit_engine (pure functions)
-    carbon_footprint = build_carbon_footprint(
-        namespace=namespace,
-        team=team,
-        cost_center=cost_center,
-        environment=environment,
-        energy_joules=energy_kwh * 3_600_000,  # Convert kWh back to joules for builder
+    carbon = carbon_footprint_from_measurement(
+        energy,
+        team=first.team if first else "unknown",
+        cost_center=first.cost_center if first else "unknown",
+        environment=first.environment if first else "unknown",
         pue=settings.PUE_CONSTANT,
         grid_intensity_gco2_per_kwh=settings.GRID_CARBON_INTENSITY_GCO2_PER_KWH,
     )
-
-    energy_breakdown = build_energy_breakdown(
-        namespace=namespace,
-        total_energy_kwh=energy_kwh,
-        idle_energy_kwh=0.0,  # P1 metric — not queried yet
-    )
-
-    # Map domain → Pydantic response
-    from app.adapters.inbound.api.schemas.greenit_schemas import (
-        carbon_footprint_to_response,
-        energy_breakdown_to_response,
-    )
-
-    cf_response = carbon_footprint_to_response(carbon_footprint)
-    eb_response = energy_breakdown_to_response(energy_breakdown)
+    breakdown = build_energy_breakdown(namespace, energy.total_kwh or 0.0, energy.idle_kwh)
 
     return {
         "namespace": namespace,
-        "carbon_footprint": cf_response.model_dump(),
-        "energy_breakdown": eb_response.model_dump(),
+        "cluster": first.cluster if first else None,
+        "carbon_footprint": carbon_footprint_to_response(carbon).model_dump(),
+        "energy_breakdown": energy_breakdown_to_response(breakdown).model_dump(),
+        "energy_source": {
+            "attribution": energy.attribution.value,
+            # V2 fix: precision depends on attribution AND power source (a
+            # container-level figure from Kepler's power MODEL is an estimate).
+            "precision": energy.precision,
+            "power_source": energy.power_source.value,
+            "scope": energy.scope,
+            "source_metric": energy.source_metric,
+            "window_hours": energy.window_hours,
+            "idle_energy_measured": energy.idle_kwh is not None,
+            "pue": settings.PUE_CONSTANT,
+            "grid_intensity_gco2_per_kwh": settings.GRID_CARBON_INTENSITY_GCO2_PER_KWH,
+        },
     }
-
-
-# =============================================================================
-# GET /api/greenit/namespace/{namespace}/history — historical from TimescaleDB
-# =============================================================================
 
 
 @router.get(
     "/namespace/{namespace}/history",
     summary="Get historical Green IT metrics for a namespace",
-    description="Retrieves stored metric snapshots from TimescaleDB (does NOT query Prometheus).",
+    description="Stored snapshots from TimescaleDB (does NOT query Prometheus).",
     response_model=None,
-    responses={
-        200: {"description": "Historical snapshots for the namespace"},
-        404: {"description": "No snapshots found for this namespace"},
-    },
+    responses={404: {"description": "No snapshots found for this namespace"}},
 )
 async def get_namespace_history(
     namespace: str,
     storage: Annotated[StoragePort, Depends(get_storage_port)],
     days: Annotated[int, Query(ge=1, le=90, description="Number of days of history")] = 7,
 ) -> dict:
-    """Get historical metric snapshots for a namespace.
-
-    This endpoint reads from TimescaleDB ONLY — it does NOT query Prometheus.
-    Data is written by the snapshot_job.py scheduler on a timer (every 5 minutes).
-
-    WHY this is a different data path than the "current" endpoint:
-    - "Current" endpoint → Prometheus (live metrics, no storage)
-    - "History" endpoint → TimescaleDB (stored snapshots, no Prometheus)
-    - They share the same router file but use completely different backends.
-    - This is intentional: the router is the composition root, not a data source.
-
-    Args:
-        namespace: Kubernetes namespace (e.g., "team-alpha")
-        storage: StoragePort dependency (injected by FastAPI)
-        days: Number of days of history (1-90, default 7)
-
-    Returns:
-        JSON response with historical snapshot data points.
-
-    Raises:
-        404: No snapshots found for this namespace in the requested time range
-    """
     snapshots = await storage.get_snapshot_history(namespace=namespace, days=days)
-
     if not snapshots:
         raise HTTPException(
             status_code=404,
             detail=f"No historical snapshots found for namespace '{namespace}' (last {days} days)",
         )
+    return snapshot_history_to_response(namespace=namespace, days=days, snapshots=snapshots).model_dump()
 
-    # Map domain → Pydantic response
-    from app.adapters.inbound.api.schemas.recommendation_schemas import snapshot_history_to_response
 
-    response = snapshot_history_to_response(namespace=namespace, days=days, snapshots=snapshots)
-    return response.model_dump()
+@router.get(
+    "/namespace/{namespace}/workloads",
+    summary="Energy and CO2 per workload and per pod (live)",
+    response_model=None,
+    responses={404: {"description": "No per-container energy for this namespace"}},
+)
+async def get_workload_carbon(
+    namespace: str,
+    metrics: Annotated[MetricsPort, Depends(get_metrics_port)],
+    window_seconds: Annotated[int, Query(ge=60, le=7 * 86400)] = 86400,
+) -> dict:
+    """V2 — cluster → namespace → workload → pod. Each figure says measured/estimated."""
+    from app.domain.greenit_engine import calculate_carbon_footprint
+
+    try:
+        items = await metrics.get_workload_energy(namespace, window_seconds=window_seconds)
+    except PrometheusUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=f"Prometheus is unavailable: {exc}") from exc
+    if not items:
+        raise HTTPException(status_code=404, detail=f"No per-container energy for namespace '{namespace}'")
+
+    def co2(kwh: float) -> float:
+        return round(calculate_carbon_footprint(kwh, settings.PUE_CONSTANT,
+                                                settings.GRID_CARBON_INTENSITY_GCO2_PER_KWH), 9)
+
+    return {
+        "namespace": namespace,
+        "window_seconds": window_seconds,
+        "workloads": [
+            {
+                "workload": w.workload,
+                "energy_kwh": round(w.kwh, 9) if w.kwh is not None else None,
+                "co2_kg": co2(w.kwh) if w.kwh is not None else None,
+                "energy_source": w.precision,           # measured | estimated | unavailable
+                "power_source": w.power_source.value,
+                "scope": w.scope,
+                "pods": [{"pod": pod, "energy_kwh": round(k, 9), "co2_kg": co2(k)} for pod, k in w.pods],
+            }
+            for w in items
+        ],
+    }

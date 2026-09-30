@@ -84,3 +84,23 @@ class DataQuality:
         quality.is_healthy(TelemetrySource.KEPLER).
         """
         return source in self.healthy_sources
+
+class MetricStatus(str, Enum):
+    """
+    Availability of ONE derived metric (storage cost, idle energy, energy attribution…).
+
+    WHY separate from TelemetrySource health:
+    - A source can be UP while a specific series is absent (e.g. Kepler is up but
+      this Kepler version does not split idle vs dynamic energy per workload).
+    - The engine must be able to say "unknown" instead of silently using 0.0.
+
+    - AVAILABLE:      measured for every item that should have it
+    - PARTIAL:        measured for some items only (e.g. 2 of 3 PVCs have kubelet stats)
+    - UNAVAILABLE:    not measurable in this environment / query failed
+    - NOT_APPLICABLE: nothing to measure (e.g. namespace without any PVC)
+    """
+
+    AVAILABLE = "available"
+    PARTIAL = "partial"
+    UNAVAILABLE = "unavailable"
+    NOT_APPLICABLE = "not_applicable"

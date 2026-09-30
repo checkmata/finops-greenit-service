@@ -13,12 +13,12 @@ This ensures the port boundary is clean: domain objects go in, domain objects co
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Sequence
 from uuid import UUID
 
-from app.domain.models.recommendation import Recommendation
+from app.domain.models.recommendation import Recommendation, StoredRecommendation
+from app.domain.models.snapshot import AggregateRow, MetricSnapshot, WorkloadSnapshot
 
 
 class StoragePort(ABC):
@@ -94,6 +94,93 @@ class StoragePort(ABC):
         """
 
     # -------------------------------------------------------------------------
+    # V1 — recommendation lifecycle with real ids + de-duplication
+    # -------------------------------------------------------------------------
+
+    @abstractmethod
+    async def upsert_recommendation(self, rec: Recommendation) -> tuple[UUID | None, str]:
+        """Insert, refresh or skip a generated recommendation (by fingerprint).
+
+        Returns (id, action) where action is "insert" | "refresh" | "skip".
+        Decision rules live in app/domain/recommendation_lifecycle.decide_upsert.
+        """
+
+    @abstractmethod
+    async def get_recommendation_record(self, rec_id: UUID) -> StoredRecommendation | None:
+        """Recommendation + id + status + timestamps. None if not found."""
+
+    @abstractmethod
+    async def list_recommendation_records(
+        self,
+        *,
+        cluster: str | None = None,
+        namespace: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Sequence[StoredRecommendation]:
+        """List stored recommendations with their REAL ids, newest first."""
+
+    @abstractmethod
+    async def mark_obsolete(
+        self, *, cluster: str, namespace: str, keep_fingerprints: set[str],
+        categories: set[str] | None = None, exclude_categories: set[str] | None = None,
+    ) -> int:
+        """Set PENDING recommendations of (cluster, namespace) that are not in
+        keep_fingerprints to `obsolete`. Human-handled states are untouched.
+        V3: several producers (rules every cycle, ML hourly) — each one only closes
+        ITS categories (`categories` = only these, `exclude_categories` = all but these).
+        Returns the number of rows changed."""
+
+    # -------------------------------------------------------------------------
+    # V1 — richer history
+    # -------------------------------------------------------------------------
+
+    @abstractmethod
+    async def save_workload_snapshots(self, snapshots: Sequence[WorkloadSnapshot]) -> None:
+        """Persist per-workload cost rows of one scheduler cycle."""
+
+    @abstractmethod
+    async def query_snapshots(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        cluster: str | None = None,
+        namespace: str | None = None,
+    ) -> Sequence[MetricSnapshot]:
+        """Namespace-level snapshots in [start, end], optional filters, oldest first."""
+
+    @abstractmethod
+    async def query_workload_snapshots(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        cluster: str | None = None,
+        namespace: str | None = None,
+        workload: str | None = None,
+    ) -> Sequence[WorkloadSnapshot]:
+        """Workload-level snapshots in [start, end], optional filters, oldest first."""
+
+    @abstractmethod
+    async def query_aggregates(
+        self,
+        *,
+        scope: str,
+        granularity: str,
+        start: datetime,
+        end: datetime,
+        cluster: str | None = None,
+        namespace: str | None = None,
+        workload: str | None = None,
+    ) -> Sequence[AggregateRow]:
+        """V2 — long-term history from the continuous aggregates.
+
+        scope: "namespace" | "workload"; granularity: "hour" | "day" | "week" | "month".
+        """
+
+    # -------------------------------------------------------------------------
     # Lifecycle
     # -------------------------------------------------------------------------
 
@@ -103,37 +190,6 @@ class StoragePort(ABC):
 
 
 # -------------------------------------------------------------------------
-# Domain model for metric snapshots (defined here to avoid circular import)
+# MetricSnapshot moved to app/domain/models/snapshot.py in V1 (history
+# aggregation is domain logic now). Re-exported here for compatibility.
 # -------------------------------------------------------------------------
-# WHY here (not in app/domain/models/):
-# - MetricSnapshot is tightly coupled to the storage port (it's a persistence concept)
-# - Keeping it here avoids bloating domain/models/ with storage-specific objects
-# - The domain engine doesn't need MetricSnapshot — it works with PodMetric/CarbonFootprint
-# - If the domain engine ever needs historical data, we can move this to domain/models/
-# -------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class MetricSnapshot:
-    """A single row of aggregated metrics for a namespace at a point in time.
-
-    This is the storage-port's domain object — not a PodMetric (which is per-pod)
-    and not a Recommendation (which is advice). This is raw telemetry for history.
-
-    Fields mirror the metric_snapshots hypertable exactly:
-    - time, namespace, team, cost_center, environment
-    - cpu_core_hours, memory_gb_hours, cost_usd
-    - energy_kwh, co2e_kg, waste_pct
-    """
-
-    time: datetime
-    namespace: str
-    team: str
-    cost_center: str
-    environment: str
-    cpu_core_hours: float
-    memory_gb_hours: float
-    cost_usd: float
-    energy_kwh: float
-    co2e_kg: float
-    waste_pct: float

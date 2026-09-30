@@ -1,0 +1,30 @@
+[13:49:05] == GitOps validation — Gitea → Argo CD (hub=secondary, OCM placement) → primary/secondary
+[13:49:05] Argo CD applications:
+banking-primary             Synced   Healthy
+banking-secondary           Synced   Healthy
+ecommerce-primary           Synced   Healthy
+ecommerce-secondary         Synced   Healthy
+finops-platform-primary     Synced   Healthy
+finops-platform-secondary   Synced   Healthy
+trading-primary             Synced   Healthy
+trading-secondary           Synced   Healthy
+[13:49:06] A. commit 7b7d9fd pushed to Gitea (annotation finops.io/gitops-test=validation-1790776146 on primary banking/txn-processor)
+[13:50:35] A. PASS — annotation present in the primary cluster 88.7s after the push (Argo CD polls Git every 60 s)
+[13:50:35] A. Argo CD revision of banking-primary: 7b7d9fd
+[13:50:35] B. Git: banking/fraud-scorer replicas=1 on primary → manual kubectl scale to 3
+[13:50:37] B. PASS — drift detected and reverted to replicas=1 by Argo CD self-heal in 2.3s
+[13:50:37] C1. secondary banking/fraud-scorer replicas=1 → scale to 2 (what the failover controller does)
+[13:52:07] C1. PASS — replicas still 2 after 90 s (ignoreDifferences /spec/replicas); app sync=Synced
+[13:52:08] C2. secondary banking/fraud-scorer: manual env change TPS=999 (Git-owned field)
+[13:52:09] C2. PASS — Git-owned field restored on the standby by Argo CD in 1.1s
+[13:52:09] A'. git revert f27f418 pushed
+[13:53:37] A'. PASS — annotation removed from the cluster 87.6s after the revert
+[13:53:37] Final:
+banking-primary             Synced   Healthy
+banking-secondary           Synced   Healthy
+ecommerce-primary           Synced   Healthy
+ecommerce-secondary         Synced   Healthy
+finops-platform-primary     Synced   Healthy
+finops-platform-secondary   Synced   Healthy
+trading-primary             Synced   Healthy
+trading-secondary           Synced   Healthy

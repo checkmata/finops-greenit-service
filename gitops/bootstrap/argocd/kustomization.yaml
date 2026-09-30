@@ -1,0 +1,29 @@
+# Argo CD in core mode (no API server / UI / Dex): the laptop has ~300 MB of free RAM.
+# Installed on the OCM hub = the `secondary` kind cluster (self-managed hub, like
+# ACM's `local-cluster`). Production: a dedicated management cluster.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: argocd
+resources:
+  - namespace.yaml
+  - https://raw.githubusercontent.com/argoproj/argo-cd/v3.5.3/manifests/core-install.yaml
+  - ocm-placement-generator.yaml
+  - ocm-placement-rbac.yaml
+  - appproject.yaml
+patches:
+  # Poll Git every 60 s (no Gitea webhook in V2.x) — bounds "commit → cluster" latency.
+  - target: {kind: ConfigMap, name: argocd-cm}
+    patch: |-
+      - op: add
+        path: /data
+        value:
+          timeout.reconciliation: 60s
+          # Overlays reference manifests/ and workloads/ (single source of truth).
+          kustomize.buildOptions: --load-restrictor LoadRestrictionsNone
+          # Watch only the kinds our manifests use (the remote identity is least-privilege).
+          resource.inclusions: |
+            - apiGroups: ["", "apps", "rbac.authorization.k8s.io", "networking.k8s.io", "policy"]
+              kinds: [Namespace, ConfigMap, Service, ServiceAccount, PersistentVolumeClaim, Pod,
+                      Deployment, ReplicaSet, StatefulSet, Role, RoleBinding, NetworkPolicy,
+                      PodDisruptionBudget]
+              clusters: ["*"]

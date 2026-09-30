@@ -1,0 +1,17 @@
+[19:40:08] == Controlled failback (data first, then workloads) — REAL
+[19:40:09] 0. PRECONDITIONS active=secondary | primary ledger recovery=f login=f timeline=5 | secondary recovery=f timeline=6
+fcdc015 ledger failback 1/2: primary ledger resyncs from secondary (generation 3)
+[19:40:09] 1. Git: primary ledger → standby of secondary (generation 3); waiting for Argo CD + base backup
+[19:41:58] 2. primary ledger rebuilt and STREAMING from secondary (t+109.7s); rows: 117400
+[19:41:58] 3. QUIESCE secondary writes (app role NOLOGIN); last secondary LSN 0/E00DA60
+[19:41:58] 4. primary replayed up to 0/E00DA60 (zero data loss switchover)
+[19:41:59] 5. primary ledger PROMOTED (timeline 7), app role re-enabled — write unavailability 1.1s
+[19:41:59]    banking writes accepted again on the primary (t+111.1s)
+511e09f ledger failback 2/2: primary is primary again, secondary resyncs as standby (generation 4)
+[19:42:00] 6. Git: primary role=primary, secondary → standby (generation 4)
+[19:43:05] 7. secondary ledger rebuilt and STREAMING from primary (t+176.7s)
+[19:44:03] 8. WORKLOAD FAILBACK by the controller: failback executed restored=9 at 2026-09-30T19:44:02.278667+00:00 (t+235.3s)
+[19:44:12] 9. CONSISTENCY rows<2026-09-30 19:44:05.815728+00 primary: 132400 rows 72f52ab6f2451abff935f7211c6b1997 | secondary: 132400 rows 72f52ab6f2451abff935f7211c6b1997 → PASS
+[19:44:12]    replication: streaming async replay_lag=00:00:00.001249
+[19:44:12]    standby deployments: banking/fraud-scorer 1,banking/txn-processor 1,ecommerce/adservice 0,ecommerce/cartservice 1,ecommerce/checkoutservice 0,ecommerce/currencyservice 1,ecommerce/emailservice 0,ecommerce/frontend 1,ecommerce/loadgenerator 0,ecommerce/paymentservice 0,ecommerce/productcatalogservice 1,ecommerce/recommendationservice 0,ecommerce/redis-cart 1,ecommerce/shippingservice 0,trading/market-feed 0,trading/order-matcher 0,
+[19:44:12] TOTAL failback duration 244.3s

@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: market-feed
+  namespace: trading
+  labels: {app: market-feed, app.kubernetes.io/part-of: trading}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: market-feed}
+  template:
+    metadata:
+      labels:
+        app: market-feed
+        # Attribution labels read by the service through kube_pod_labels
+        # (kube-state-metrics must allow-list them: see scripts/k8s/values-kube-prometheus-stack.yaml)
+        team: markets
+        cost-center: cc-trading
+        environment: prod
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      securityContext: {runAsNonRoot: true}
+      containers:
+        - name: market-feed
+          image: finops-demo/trading:local
+          imagePullPolicy: IfNotPresent
+          ports: [{containerPort: 8080, name: metrics}]
+          env:
+            - name: ORDERS_PER_SECOND
+              value: "300"
+          resources:
+            requests: {cpu: "250m", memory: "256Mi"}
+            limits: {memory: "256Mi"}

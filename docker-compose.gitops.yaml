@@ -1,0 +1,28 @@
+# V2.x — local Git server for GitOps (Argo CD pulls from it over the `kind` network).
+# Local only: nothing is pushed to GitHub. Admin password is generated into
+# .secrets/ (git-ignored) by scripts/gitops/gitea-up.sh, never written here.
+services:
+  gitea:
+    image: gitea/gitea:1.22.3-rootless
+    restart: unless-stopped
+    environment:
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__server__ROOT_URL: http://gitea:3000/
+      GITEA__server__HTTP_PORT: "3000"
+      GITEA__server__DISABLE_SSH: "true"
+      GITEA__database__DB_TYPE: sqlite3        # Gitea's own metadata only
+      GITEA__service__DISABLE_REGISTRATION: "true"
+      GITEA__repository__DEFAULT_BRANCH: main
+      GITEA__webhook__ALLOWED_HOST_LIST: "*"
+    ports: ["127.0.0.1:3001:3000"]
+    volumes: [gitea-data:/var/lib/gitea, gitea-config:/etc/gitea]
+    mem_limit: 256m
+    networks: [kind]
+
+volumes:
+  gitea-data:
+  gitea-config:
+
+networks:
+  kind:
+    external: true

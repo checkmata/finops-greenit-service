@@ -1,35 +1,37 @@
-# Grafana datasource provisioning — auto-configures Prometheus and TimescaleDB.
-# WHY provisioning (not manual UI setup):
-# - Reproducible: every docker compose up starts with identical datasources
-# - No human error: no forgetting to add a datasource after restarting
-# - Git-tracked: changes to datasources are code-reviewed
-# - Production parity: same pattern as OpenShift ConfigMaps for Grafana
-
+# Grafana datasources (provisioned). One Prometheus per (simulated) cluster +
+# TimescaleDB for FinOps/GreenIT history. Stable `uid`s are referenced by the
+# dashboards in grafana/dashboards/.
 apiVersion: 1
 
 datasources:
-  # --- Prometheus (scraped metrics from the fake exporter) ---
-  - name: Prometheus
+  - name: Prometheus-primary
+    uid: prom-primary
     type: prometheus
     access: proxy
-    url: http://prometheus:9090
+    url: ${PROMETHEUS_PRIMARY_URL}
     isDefault: true
     editable: false
-    jsonData:
-      timeInterval: "15s"
+    jsonData: {timeInterval: "10s"}
 
-  # --- TimescaleDB (historical snapshots) ---
+  - name: Prometheus-secondary
+    uid: prom-secondary
+    type: prometheus
+    access: proxy
+    url: ${PROMETHEUS_SECONDARY_URL}
+    editable: false
+    jsonData: {timeInterval: "10s"}
+
   - name: TimescaleDB
+    uid: timescaledb
     type: postgres
     access: proxy
-    url: timescaledb:5432
+    url: ${TIMESCALEDB_HOST}:5432   # set by compose; Grafana does not support ${VAR:-default}
     user: finops
     editable: false
     secureJsonData:
-      password: finops_dev_password
+      password: ${POSTGRES_PASSWORD}   # from the container env (never committed)
     jsonData:
       database: finops_greenit
       sslmode: disable
-      maxOpenConns: 10
-      maxIdleConns: 5
-      connMaxLifetime: 14400
+      timescaledb: true
+      postgresVersion: 1600

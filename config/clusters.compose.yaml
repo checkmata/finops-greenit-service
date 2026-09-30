@@ -1,0 +1,8 @@
+# Same simulation as clusters.local.yaml, with docker-compose service names.
+clusters:
+  - name: primary
+    role: primary
+    prometheus_url: http://prometheus-primary:9090
+  - name: secondary
+    role: secondary
+    prometheus_url: http://prometheus-secondary:9090

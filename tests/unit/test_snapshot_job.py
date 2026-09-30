@@ -28,6 +28,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.domain.models.data_quality import DataQuality, TelemetrySource
+from app.domain.models.energy import EnergyAttribution, EnergyMeasurement
 from app.domain.models.pod_metric import PodMetric
 from app.ports.metrics_port import MetricsPort
 from app.ports.storage_port import StoragePort
@@ -63,6 +64,15 @@ def mock_metrics():
         timestamp=NOW,
     )
     mock.get_energy_kwh.return_value = 5.0
+    # V1 port methods — realistic values so the normal path is exercised
+    mock.ping.return_value = True
+    mock.list_namespaces.return_value = ["team-alpha"]
+    mock.get_workload_metrics.return_value = []
+    mock.get_workload_energy.return_value = []
+    mock.get_storage_metrics.return_value = []
+    mock.get_energy.return_value = EnergyMeasurement(
+        "team-alpha", 5.0, None, EnergyAttribution.CONTAINER, "kepler_container_cpu_joules_total"
+    )
     return mock
 
 
@@ -71,6 +81,7 @@ def mock_storage():
     """Create a mock StoragePort for testing."""
     mock = AsyncMock(spec=StoragePort)
     mock.save_recommendation.return_value="test-uuid"
+    mock.upsert_recommendation.return_value = ("test-uuid", "insert")
     mock.save_snapshot.return_value = None
     return mock
 
@@ -115,6 +126,9 @@ class TestSnapshotCycleNormal:
         assert rec_count >= 0
         mock_metrics.get_pod_metrics.assert_called_once_with(namespace="team-alpha")
         mock_storage.save_snapshot.assert_called_once()
+        saved = mock_storage.save_snapshot.call_args.args[0]
+        assert saved.cost_usd > 0  # V1: cost is historized (MVP stored 0.0)
+        assert saved.co2e_kg == pytest.approx(5.0 * 1.4 * 0.475)
 
     @pytest.mark.asyncio
     async def test_cycle_with_multiple_namespaces(self, mock_metrics, mock_storage):
@@ -258,3 +272,17 @@ class TestStartSnapshotScheduler:
             namespaces=["team-alpha"],
         )
         assert rec_count >= 0
+
+class TestAbsentNamespace:
+    @pytest.mark.asyncio
+    async def test_namespace_without_requests_or_usage_is_not_snapshotted(self, mock_metrics, mock_storage):
+        """Regression from the REAL E2E test: no zero-valued snapshot for a namespace absent from a cluster."""
+        from app.scheduler.snapshot_job import run_snapshot_cycle
+
+        mock_metrics.get_pod_metrics.return_value = [PodMetric(
+            namespace="trading", team="unknown", cost_center="unknown", environment="unknown",
+            cpu_core_hours=0.0, memory_bytes=0.0, cpu_requested=0.0, memory_requested=0.0, timestamp=NOW,
+        )]
+        assert await run_snapshot_cycle(mock_metrics, mock_storage, namespaces=["trading"]) == 0
+        mock_storage.save_snapshot.assert_not_called()
+        mock_storage.upsert_recommendation.assert_not_called()

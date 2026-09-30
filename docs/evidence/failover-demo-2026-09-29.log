@@ -1,0 +1,85 @@
+== [22:46:57] 1. NOMINAL
+active=primary mode=primary_active status="stable on primary"
+   banking/fraud-scorer 1 1
+   banking/txn-processor 1 1
+   ecommerce/adservice 0 <none>
+   ecommerce/cartservice 1 1
+   ecommerce/checkoutservice 0 <none>
+   ecommerce/currencyservice 1 1
+   ecommerce/emailservice 0 <none>
+   ecommerce/frontend 1 1
+   ecommerce/loadgenerator 0 <none>
+   ecommerce/paymentservice 0 <none>
+   ecommerce/productcatalogservice 1 1
+   ecommerce/recommendationservice 0 <none>
+   ecommerce/redis-cart 1 1
+   ecommerce/shippingservice 0 <none>
+== [22:46:57] 2. PRIMARY OUTAGE: docker pause primary-control-plane
+== [22:46:58] 3. detection + hysteresis (failure threshold from config)
+  [22:46:58] active=primary mode=primary_active status="stable on primary"
+  [22:47:03] active=primary mode=primary_active status="stable on primary"
+  [22:47:08] active=primary mode=primary_active status="stable on primary"
+  [22:47:13] active=primary mode=primary_active status="primary failing 0s/30s (hysteresis)"
+  [22:47:18] active=primary mode=primary_active status="primary failing 0s/30s (hysteresis)"
+  [22:47:23] active=primary mode=primary_active status="primary failing 0s/30s (hysteresis)"
+  [22:47:28] active=primary mode=primary_active status="primary failing 15s/30s (hysteresis)"
+  [22:47:33] active=primary mode=primary_active status="primary failing 15s/30s (hysteresis)"
+  [22:47:38] active=primary mode=primary_active status="primary failing 15s/30s (hysteresis)"
+== [22:47:43] 4. FAILED OVER
+active=secondary mode=failed_over status="failed over to secondary"
+ event: failover executed | primary unhealthy for 30s ≥ 30s
+ scaled: [{'to': 2, 'from': 1, 'namespace': 'banking', 'deployment': 'txn-processor'}, {'to': 1, 'from': 0, 'namespace': 'ecommerce', 'deployment': 'adservice'}, {'to': 1, 'from': 0, 'namespace': 'ecommerce', 'deployment': 'checkoutservice'}, {'to': 1, 'from': 0, 'namespace': 'ecommerce', 'deployment': 'emailservice'}, {'to': 1, 'from': 0, 'namespace': 'ecommerce', 'deployment': 'paymentservice'}, {'to': 1, 'from': 0, 'namespace': 'ecommerce', 'deployment': 'recommendationservice'}, {'to': 1, 'from': 0, 'namespace': 'ecommerce', 'deployment': 'shippingservice'}]
+ not_replicated: ['trading/market-feed', 'trading/order-matcher']
+== [22:47:43] 5. standby promoted — waiting for pods to be Available
+   banking/fraud-scorer 1 1
+   banking/txn-processor 2 2
+   ecommerce/adservice 1 1
+   ecommerce/cartservice 1 1
+   ecommerce/checkoutservice 1 1
+   ecommerce/currencyservice 1 1
+   ecommerce/emailservice 1 1
+   ecommerce/frontend 1 1
+   ecommerce/loadgenerator 0 <none>
+   ecommerce/paymentservice 1 1
+   ecommerce/productcatalogservice 1 1
+   ecommerce/recommendationservice 1 1
+   ecommerce/redis-cart 1 1
+   ecommerce/shippingservice 1 1
+   frontend on secondary answers HTTP: 200
+   secondary metrics seen by the service:
+    ecommerce@secondary used $/month: 1.5523 | workloads: 13
+== [22:48:13] 6. PRIMARY BACK: docker unpause primary-control-plane
+== [22:48:13] 7. recovery hysteresis (recovery threshold from config)
+  [22:48:13] active=secondary mode=failed_over status="primary still unhealthy"
+  [22:48:19] active=secondary mode=failed_over status="primary healthy 0s/60s (hysteresis)"
+  [22:48:24] active=secondary mode=failed_over status="primary still unhealthy"
+  [22:48:29] active=secondary mode=failed_over status="primary healthy 0s/60s (hysteresis)"
+  [22:48:34] active=secondary mode=failed_over status="primary healthy 5s/60s (hysteresis)"
+  [22:48:39] active=secondary mode=failed_over status="primary healthy 10s/60s (hysteresis)"
+  [22:48:44] active=secondary mode=failed_over status="primary healthy 15s/60s (hysteresis)"
+  [22:48:49] active=secondary mode=failed_over status="primary healthy 20s/60s (hysteresis)"
+  [22:48:54] active=secondary mode=failed_over status="primary healthy 25s/60s (hysteresis)"
+  [22:48:59] active=secondary mode=failed_over status="primary healthy 30s/60s (hysteresis)"
+  [22:49:04] active=secondary mode=failed_over status="primary healthy 35s/60s (hysteresis)"
+  [22:49:09] active=secondary mode=failed_over status="primary healthy 40s/60s (hysteresis)"
+  [22:49:14] active=secondary mode=failed_over status="primary healthy 45s/60s (hysteresis)"
+  [22:49:19] active=secondary mode=failed_over status="primary healthy 50s/60s (hysteresis)"
+  [22:49:24] active=secondary mode=failed_over status="primary healthy 55s/60s (hysteresis)"
+== [22:49:29] 8. FAILED BACK
+active=primary mode=primary_active status="failed back to primary"
+ event: failback executed | primary healthy for 60s ≥ 60s
+ restored: [{'to': 1, 'from': 2, 'namespace': 'banking', 'deployment': 'txn-processor'}, {'to': 0, 'from': 1, 'namespace': 'ecommerce', 'deployment': 'adservice'}, {'to': 0, 'from': 1, 'namespace': 'ecommerce', 'deployment': 'checkoutservice'}, {'to': 0, 'from': 1, 'namespace': 'ecommerce', 'deployment': 'emailservice'}, {'to': 0, 'from': 1, 'namespace': 'ecommerce', 'deployment': 'paymentservice'}, {'to': 0, 'from': 1, 'namespace': 'ecommerce', 'deployment': 'recommendationservice'}, {'to': 0, 'from': 1, 'namespace': 'ecommerce', 'deployment': 'shippingservice'}]
+   banking/fraud-scorer 1 1
+   banking/txn-processor 1 1
+   ecommerce/adservice 0 <none>
+   ecommerce/cartservice 1 1
+   ecommerce/checkoutservice 0 <none>
+   ecommerce/currencyservice 1 1
+   ecommerce/emailservice 0 <none>
+   ecommerce/frontend 1 1
+   ecommerce/loadgenerator 0 <none>
+   ecommerce/paymentservice 0 <none>
+   ecommerce/productcatalogservice 1 1
+   ecommerce/recommendationservice 0 <none>
+   ecommerce/redis-cart 1 1
+   ecommerce/shippingservice 0 <none>

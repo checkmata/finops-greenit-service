@@ -23,6 +23,14 @@ from uuid import UUID
 
 from fastapi.testclient import TestClient
 
+from app.adapters.inbound.api.dependencies import get_cluster_registry
+from app.cluster_registry import ClusterRegistry
+from app.domain.models.cluster import ClusterRole
+from app.domain.models.energy import EnergyAttribution, EnergyMeasurement
+from app.domain.models.recommendation import StoredRecommendation
+from app.ports.metrics_port import MetricsPort
+from app.ports.storage_port import StoragePort
+
 from app.adapters.inbound.api.finops_router import (
     get_metrics_port as finops_get_metrics_port,
     get_storage_port as finops_get_storage_port,
@@ -53,7 +61,7 @@ from app.ports.storage_port import MetricSnapshot
 # =============================================================================
 
 
-class FakeMetricsPort:
+class FakeMetricsPort(MetricsPort):
     """Fake MetricsPort for API tests.
 
     WHY a class (not a lambda):
@@ -90,8 +98,34 @@ class FakeMetricsPort:
     async def get_energy_kwh(self, namespace: str) -> float:
         return self._energy_kwh
 
+    # --- V1 port methods ---
+    async def ping(self) -> bool:
+        return True
 
-class FakeStoragePort:
+    async def list_namespaces(self) -> list[str]:
+        return sorted({p.namespace for p in self._pod_metrics})
+
+    async def get_workload_metrics(self, namespace: str, namespace_total=None) -> list[PodMetric]:
+        return []
+
+    async def get_workload_energy(self, namespace: str, window_seconds: int = 86400) -> list:
+        return []
+
+    async def get_energy(self, namespace: str, window_seconds: int = 86400) -> EnergyMeasurement:
+        # Delegates to get_energy_kwh so subclasses overriding it (error cases) still apply.
+        from app.adapters.outbound.prometheus_adapter import PrometheusQueryError
+
+        try:
+            kwh = await self.get_energy_kwh(namespace)
+        except PrometheusQueryError:
+            return EnergyMeasurement(namespace, None, None, EnergyAttribution.UNAVAILABLE, "none")
+        return EnergyMeasurement(namespace, kwh, None, EnergyAttribution.CONTAINER, "fake")
+
+    async def get_deployment_availability(self) -> list:
+        return []
+
+
+class FakeStoragePort(StoragePort):
     """Fake StoragePort for API tests.
 
     Stores data in memory — enough for router logic verification.
@@ -151,6 +185,50 @@ class FakeStoragePort:
 
     async def close(self) -> None:
         pass
+
+    # --- V1 port methods ---
+    def _stored(self, rec_id: UUID) -> StoredRecommendation:
+        now = datetime.now(tz=timezone.utc)
+        return StoredRecommendation(rec_id, self._statuses[rec_id], now, now, self._recommendations[rec_id])
+
+    async def upsert_recommendation(self, rec: Recommendation):
+        return await self.save_recommendation(rec), "insert"
+
+    async def get_recommendation_record(self, rec_id: UUID):
+        return self._stored(rec_id) if rec_id in self._recommendations else None
+
+    async def list_recommendation_records(
+        self, *, cluster=None, namespace=None, status=None, limit=50, offset=0
+    ):
+        out = [
+            self._stored(i) for i in self._recommendations
+            if (namespace is None or self._recommendations[i].namespace == namespace)
+            and (cluster is None or self._recommendations[i].cluster == cluster)
+            and (status is None or self._statuses[i] == status)
+        ]
+        return out[offset: offset + limit]
+
+    async def save_workload_snapshots(self, snapshots) -> None:
+        pass
+
+    async def mark_obsolete(self, *, cluster, namespace, keep_fingerprints, categories=None,
+                            exclude_categories=None) -> int:
+        changed = 0
+        for i, rec in self._recommendations.items():
+            if (rec.cluster, rec.namespace) == (cluster, namespace) and self._statuses[i] == "pending" \
+                    and rec.fingerprint not in keep_fingerprints:
+                self._statuses[i] = "obsolete"
+                changed += 1
+        return changed
+
+    async def query_snapshots(self, *, start, end, cluster=None, namespace=None):
+        return [s for s in self._snapshots if namespace is None or s.namespace == namespace]
+
+    async def query_workload_snapshots(self, *, start, end, cluster=None, namespace=None, workload=None):
+        return []
+
+    async def query_aggregates(self, **kwargs):
+        return []
 
     def _seed_recommendation(self, rec: Recommendation) -> UUID:
         """Seed a recommendation directly (bypasses async, for test setup only)."""
@@ -265,6 +343,9 @@ def _make_test_client(
     app.dependency_overrides[health_get_metrics_port] = lambda: metrics
     app.dependency_overrides[health_get_storage_port] = lambda: storage
     app.dependency_overrides[recs_get_storage_port] = lambda: storage
+    # V1: routers share one registry of per-cluster MetricsPorts.
+    registry = ClusterRegistry({"local": ClusterRole.PRIMARY}, {"local": metrics})
+    app.dependency_overrides[get_cluster_registry] = lambda: registry
 
     client = TestClient(app, raise_server_exceptions=False)
     return client, metrics, storage
@@ -540,6 +621,8 @@ class TestResponseStructure:
         expected_keys = {
             "namespace", "pod_count", "pods",
             "requested_cost_usd", "actual_cost_usd", "cost_savings_usd",
+            # V1 additions (additive contract change, documented in docs/FINOPS.md)
+            "cluster", "cost_breakdown", "storage_status", "workloads",
         }
         assert expected_keys == set(data.keys())
 
@@ -551,7 +634,11 @@ class TestResponseStructure:
         client, _, _ = _make_test_client(metrics_port=metrics)
         response = client.get("/api/greenit/namespace/team-alpha")
         data = response.json()
-        expected_keys = {"namespace", "carbon_footprint", "energy_breakdown"}
+        expected_keys = {
+            "namespace", "carbon_footprint", "energy_breakdown",
+            # V1 additions: provenance of the energy figure
+            "cluster", "energy_source",
+        }
         assert expected_keys == set(data.keys())
 
     def test_health_response_keys(self) -> None:
