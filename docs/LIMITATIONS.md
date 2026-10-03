@@ -86,6 +86,10 @@ Ce qui reste **non vérifié** :
 | Prévision : le modèle choisi sur la validation fait **pire que naive** sur 10/38 séries | MEASURED |
 | Anomalies réelles : précision **non mesurable** sans étiquettes (41 épisodes, 4 liés à une opération) | PARTIAL |
 | Monitoring (Helm) pas encore géré par Argo CD | PARTIAL |
+| **Panne longue d'un cluster et GitOps** : jusqu'au 03/10, une panne de plus de ~4 min retirait le cluster de la décision OCM, et Argo CD supprimait ses workloads (incident réel du 01/10, [DR §5](DR.md)) | corrigé (`preserveResourcesOnDeletion` + tolérances OCM) ; **VALIDATED** par une panne réelle de 420 s ; non rejoué sans le correctif |
+| Hôte saturé en mémoire : l'OOM killer a provoqué un failover réel non planifié le 01/10 | PARTIAL : l'hôte n'a que ~300 Mo libres ; aucune alerte branchée |
+| Jeton de l'actionneur à 24 h (réémis le 03/10, expire le 04/10 15:23 UTC) et invalidé si son ServiceAccount est recréé | PARTIAL : `probe()` le signale (`unauthorized`) mais rien n'alerte ; à renouveler, ou à remplacer par un jeton projeté |
+| Retour vers le primary du registre après l'incident du 01/10 non effectué : le service tourne sur `secondary` | REQUIRES USER ACTION (`scripts/dr/ledger-failback.sh`, efface l'ancienne copie du primary) |
 
 ## 2 quater. Sécurité du dépôt (audit du 30/09/2026)
 
