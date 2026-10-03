@@ -1,51 +1,106 @@
 """
-Snapshot job — periodic persistence of metric snapshots and recommendations.
+Snapshot job — periodic collection, analysis and persistence (V1: multicluster).
 
-Runs on a timer (default: every 5 minutes). Queries Prometheus for current state,
-generates recommendations via the domain engine, and writes both to TimescaleDB.
+Every cycle, for every cluster, for every selected namespace:
 
-WHY this is the ONLY place that writes to storage:
-- Prevents duplicate rows on every Grafana refresh (router reads only)
-- Centralizes persistence logic (one place to test, one place to monitor)
-- Decouples HTTP layer (routers) from storage (TimescaleDB)
-- Enables retry/backoff logic in one place (not scattered across routers)
+    MetricsPort (that cluster's Prometheus)
+        get_pod_metrics            namespace aggregate
+        get_workload_metrics       per-workload breakdown (label `app` by default)
+        get_storage_metrics        PVCs (None if unavailable → not priced)
+        get_energy                 energy + provenance (container/pod/node-share/unavailable)
+        check_data_quality         which telemetry sources are up
+          ↓
+    Domain (pure)
+        finops_engine              requested / actual cost, per-component waste
+        greenit_engine             kWh → kgCO2 (None if energy unavailable)
+        recommendation_engine      rules → Recommendations (per workload when possible)
+          ↓
+    StoragePort (TimescaleDB)
+        upsert_recommendation      de-duplicated by fingerprint
+        save_workload_snapshots    per-workload cost history
+        save_snapshot              per-namespace cost + energy + CO2 history
 
-WHY asyncio.sleep (not a task queue like Celery):
-- For a single-node MVP, asyncio.sleep is sufficient and zero-dependency.
-- No Redis/RabbitMQ broker to manage, no worker processes to orchestrate.
-- When we need distributed scheduling (multi-pod), we migrate to:
-  - OpenShift CronJob (runs as a Kubernetes Job on a schedule)
-  - Or a lightweight scheduler like APScheduler with a DB backend
-- The async loop pattern maps 1:1 to a CronJob — just extract run_snapshot_cycle()
-  into a standalone script and call it from the CronJob's command.
+WHY this is still the ONLY writer: routers must never write on each request
+(Grafana refreshes would duplicate rows) — unchanged from the MVP.
+
+WHY asyncio.sleep (not Celery/CronJob): single-replica MVP; run_once() is the
+entry point to move to an OpenShift CronJob later (docs/ROADMAP.md).
 """
 
-import asyncio
-import logging
-from datetime import datetime, timezone
-from typing import Sequence
+from __future__ import annotations
 
+import asyncio
+import dataclasses
+import logging
+import time
+from datetime import datetime, timezone
+from typing import Mapping, Sequence
+
+from app import observability as obs
 from app.config import settings
-from app.domain.greenit_engine import (
-    build_carbon_footprint,
-    build_energy_breakdown,
+from app.domain.finops_engine import (
+    BYTES_PER_GB,
+    calculate_monthly_cost,
+    calculate_requested_cost,
+    summarize_waste,
 )
-from app.domain.models.recommendation import RecommendationSet
+from app.domain.greenit_engine import (
+    build_energy_breakdown,
+    calculate_carbon_footprint,
+    carbon_footprint_from_measurement,
+)
+from app.domain.models.data_quality import DataQuality, TelemetrySource
+from app.domain.models.energy import EnergyAttribution, EnergyMeasurement, WorkloadEnergy
+from app.domain.models.pod_metric import PodMetric, StorageMetric
+from app.domain.models.recommendation import Category, RecommendationSet
+from app.domain.models.snapshot import MetricSnapshot, WorkloadSnapshot
+from app.domain.namespace_selection import select_namespaces
 from app.domain.recommendation_engine import generate_all_recommendations
 from app.ports.metrics_port import MetricsPort
-from app.ports.storage_port import MetricSnapshot, StoragePort
+from app.ports.failover_ports import LeaderElectionPort
+from app.ports.storage_port import StoragePort
 
 logger = logging.getLogger(__name__)
 
-# Default interval between snapshot runs (seconds).
-# WHY 5 minutes: balances freshness vs Prometheus load.
-# At 5-min intervals, we get ~288 data points per day per namespace.
-# With 7-day retention, that's ~2,016 rows per namespace — manageable.
-SNAPSHOT_INTERVAL_SECONDS = 300  # 5 minutes
+# Default interval between snapshot runs (seconds) — overridable by
+# SCHEDULER_INTERVAL_SECONDS. 5 min ≈ 288 points/day/namespace.
+SNAPSHOT_INTERVAL_SECONDS = 300
 
 
 # =============================================================================
-# Single cycle — the core logic (testable in isolation)
+# Namespace resolution
+# =============================================================================
+
+
+async def resolve_namespaces(
+    metrics_port: MetricsPort,
+    namespaces: Sequence[str] | None,
+) -> list[str]:
+    """
+    V1 fix — the MVP processed only ["default"].
+
+    - explicit list given (argument or SCHEDULER_NAMESPACES) → used as-is
+    - otherwise discovered from Prometheus and filtered by
+      NAMESPACE_INCLUDE_REGEX / NAMESPACE_EXCLUDE_REGEX
+    """
+    explicit = list(namespaces) if namespaces else settings.explicit_namespaces
+    if explicit:
+        return select_namespaces([], explicit=explicit)
+    try:
+        discovered = await metrics_port.list_namespaces()
+        discovered = [n for n in discovered if isinstance(n, str)]
+    except Exception as exc:
+        logger.warning("Namespace discovery failed: %s", exc)
+        discovered = []
+    return select_namespaces(
+        discovered,
+        include_regex=settings.NAMESPACE_INCLUDE_REGEX,
+        exclude_regex=settings.NAMESPACE_EXCLUDE_REGEX,
+    )
+
+
+# =============================================================================
+# One cluster, one cycle
 # =============================================================================
 
 
@@ -54,58 +109,75 @@ async def run_snapshot_cycle(
     storage_port: StoragePort,
     *,
     namespaces: Sequence[str] | None = None,
+    cluster: str = "default",
 ) -> int:
-    """Execute one snapshot cycle: query Prometheus → generate recs → persist.
+    """Execute one cycle for ONE cluster. Returns the number of recommendations generated.
 
-    This function is THE boundary between:
-    - Querying live metrics (MetricsPort → Prometheus)
-    - Generating domain advice (recommendation_engine → domain models)
-    - Persisting results (StoragePort → TimescaleDB)
-
-    Args:
-        metrics_port: Port for fetching telemetry from Prometheus/Kepler.
-        storage_port: Port for persisting to TimescaleDB.
-        namespaces: Optional list of namespaces to process. If None, processes
-                    a default namespace (real discovery via PromQL in production).
-
-    Returns:
-        Number of recommendations generated and persisted.
-
-    Error handling:
-        - Each namespace is processed independently (one failure doesn't block others).
-        - Prometheus failures are logged and skipped (we don't persist stale data).
-        - Storage failures are logged and skipped (we don't crash the scheduler).
-        - The cycle always returns a count, even if some namespaces failed.
+    Each namespace is processed independently: one failure never blocks the others.
     """
     now = datetime.now(timezone.utc)
     rec_count = 0
+    started = time.monotonic()
+    selected = await resolve_namespaces(metrics_port, namespaces)
+    if not selected:
+        logger.warning("cluster=%s: no namespace selected (discovery empty or all excluded)", cluster)
 
-    # Discover namespaces if not provided.
-    # In production, this would query Prometheus for all namespaces with pods.
-    # For MVP, we process a fixed list (configurable via env var or default).
-    if namespaces is None:
-        namespaces = ["default"]
-
-    for ns in namespaces:
+    for ns in selected:
         try:
-            ns_rec_count = await _process_namespace(
+            rec_count += await _process_namespace(
                 metrics_port=metrics_port,
                 storage_port=storage_port,
                 namespace=ns,
                 now=now,
+                cluster=cluster,
             )
-            rec_count += ns_rec_count
         except Exception as exc:
-            # Log but continue — one namespace failure shouldn't crash the cycle.
-            logger.error(
-                "Snapshot failed for namespace=%s: %s",
-                ns,
-                exc,
-                exc_info=True,
-            )
-            continue
+            obs.NAMESPACE_ERRORS.labels(cluster).inc()
+            logger.error("Snapshot failed for cluster=%s namespace=%s: %s", cluster, ns, exc, exc_info=True)
 
+    obs.NAMESPACES_PROCESSED.labels(cluster).set(len(selected))
+    obs.SCHEDULER_CYCLE_SECONDS.labels(cluster).observe(time.monotonic() - started)
+    obs.LAST_CYCLE_TIMESTAMP.labels(cluster).set(time.time())
     return rec_count
+
+
+async def run_multicluster_cycle(
+    cluster_ports: Mapping[str, MetricsPort],
+    storage_port: StoragePort,
+    *,
+    namespaces: Sequence[str] | None = None,
+) -> int:
+    """One cycle over every cluster. An unreachable cluster is skipped (logged + counted)."""
+    total = 0
+    for name, port in cluster_ports.items():
+        try:
+            reachable = await port.ping()
+        except Exception:
+            reachable = False
+        if not reachable:
+            obs.SCHEDULER_CYCLES.labels(name, "unreachable").inc()
+            logger.warning("cluster=%s: Prometheus unreachable, cycle skipped", name)
+            continue
+        total += await run_snapshot_cycle(port, storage_port, namespaces=namespaces, cluster=name)
+        obs.SCHEDULER_CYCLES.labels(name, "ok").inc()
+    return total
+
+
+# =============================================================================
+# One namespace
+# =============================================================================
+
+
+ML_CATEGORIES = {Category.ANOMALY.value, Category.COST_RIGHTSIZING_ML.value}
+
+
+def _is_absent(pod: PodMetric) -> bool:
+    """No request and no usage at all: the namespace is not deployed on this cluster."""
+    return not any((pod.cpu_requested, pod.memory_requested, pod.cpu_core_hours, pod.memory_bytes))
+
+
+def _unavailable_energy(namespace: str) -> EnergyMeasurement:
+    return EnergyMeasurement(namespace, None, None, EnergyAttribution.UNAVAILABLE, "none")
 
 
 async def _process_namespace(
@@ -113,211 +185,255 @@ async def _process_namespace(
     storage_port: StoragePort,
     namespace: str,
     now: datetime,
+    cluster: str = "default",
 ) -> int:
-    """Process a single namespace: fetch metrics, generate recs, persist.
-
-    This is a helper that isolates the per-namespace logic from the loop.
-    It makes error handling cleaner and the code more readable.
-
-    Returns:
-        Number of recommendations generated for this namespace.
-    """
-    # -------------------------------------------------------------------------
-    # Phase 1: Query Prometheus for current state
-    # -------------------------------------------------------------------------
-    # WHY try/except around each Prometheus call:
-    # - If one metric is unavailable (e.g., Kepler down), we can still
-    #   process other metrics (e.g., FinOps from kube-state-metrics).
-    # - The recommendation_engine handles DataQuality gating internally.
-    # -------------------------------------------------------------------------
+    # --- Phase 1: collect ------------------------------------------------------
     try:
         pod_metrics = await metrics_port.get_pod_metrics(namespace=namespace)
     except Exception as exc:
         logger.warning("Failed to fetch pod metrics for namespace=%s: %s", namespace, exc)
         pod_metrics = []
 
+    if not pod_metrics:
+        logger.warning("No pod metrics for namespace=%s — skipping", namespace)
+        return 0
+    pod = dataclasses.replace(pod_metrics[0], cluster=cluster)
+    if _is_absent(pod):
+        # Found by the REAL E2E test (V2): an explicit namespace list is shared by
+        # all clusters, and PromQL sum() over no series became 0.0 → a zero-cost
+        # snapshot (plus recommendations) for a namespace that does not exist on
+        # this cluster. Nothing requested and nothing used = not deployed here.
+        logger.info("cluster=%s namespace=%s: no workload on this cluster — skipped", cluster, namespace)
+        return 0
+
     try:
         quality = await metrics_port.check_data_quality()
     except Exception as exc:
+        # V1 fix: the MVP fallback omitted `timestamp` and raised TypeError.
+        # Unknown health → assume NOTHING is healthy (safer than assuming all is).
         logger.warning("Failed to check data quality: %s", exc)
-        # Default to all sources healthy (engine will generate recs for everything)
-        from app.domain.models.data_quality import DataQuality, TelemetrySource
-        quality = DataQuality(healthy_sources=frozenset(TelemetrySource))
+        quality = DataQuality(healthy_sources=frozenset(), timestamp=now)
 
     try:
-        energy_kwh = await metrics_port.get_energy_kwh(namespace=namespace)
+        raw_workloads = await metrics_port.get_workload_metrics(namespace, namespace_total=pod)
+        workloads = [dataclasses.replace(w, cluster=cluster) for w in raw_workloads if isinstance(w, PodMetric)]
     except Exception as exc:
-        logger.warning("Failed to fetch energy for namespace=%s: %s", namespace, exc)
-        energy_kwh = 0.0
+        logger.warning("Workload breakdown unavailable for namespace=%s: %s", namespace, exc)
+        workloads = []
 
-    # -------------------------------------------------------------------------
-    # Phase 2: Build domain objects from raw metrics
-    # -------------------------------------------------------------------------
-    # WHY build here (not in the adapter):
-    # - The adapter returns raw PodMetric/StorageMetric lists.
-    # - The scheduler (this file) orchestrates: fetch → build → generate → persist.
-    # - The recommendation_engine expects CarbonFootprint/EnergyBreakdown, not raw kWh.
-    # -------------------------------------------------------------------------
-    # Use first pod metric for namespace-level attribution (team, cost_center, etc.)
-    first_pod = pod_metrics[0] if pod_metrics else None
-    team = first_pod.team if first_pod else "unknown"
-    cost_center = first_pod.cost_center if first_pod else "unknown"
-    environment = first_pod.environment if first_pod else "unknown"
+    storage: list[StorageMetric] | None
+    try:
+        raw_storage = await metrics_port.get_storage_metrics(namespace=namespace)
+        storage = [s for s in raw_storage if isinstance(s, StorageMetric)] if isinstance(raw_storage, list) else None
+    except Exception as exc:
+        logger.warning("Storage metrics unavailable for namespace=%s: %s", namespace, exc)
+        storage = None  # → storage_status "unavailable", NOT priced as 0
 
-    # Build CarbonFootprint from energy_kwh (already in kWh from Kepler adapter)
-    carbon_footprint = build_carbon_footprint(
-        namespace=namespace,
-        team=team,
-        cost_center=cost_center,
-        environment=environment,
-        energy_joules=energy_kwh * 3_600_000,  # Convert kWh back to joules for builder
-        pue=settings.PUE_CONSTANT,
-        grid_intensity_gco2_per_kwh=settings.GRID_CARBON_INTENSITY_GCO2_PER_KWH,
-        timestamp=now,
-    )
+    try:
+        energy = await metrics_port.get_energy(namespace=namespace)
+        if not isinstance(energy, EnergyMeasurement):
+            energy = _unavailable_energy(namespace)
+    except Exception as exc:
+        logger.warning("Energy unavailable for namespace=%s: %s", namespace, exc)
+        energy = _unavailable_energy(namespace)
 
-    # Build EnergyBreakdown (idle waste is P1, defaults to 0 for MVP)
-    energy_breakdown = build_energy_breakdown(
-        namespace=namespace,
-        total_energy_kwh=energy_kwh,
-        idle_energy_kwh=0.0,  # P1 metric — not queried yet
-        timestamp=now,
-    )
+    # V2: energy over THIS cycle's interval (summable for hour/day/month totals)
+    # and per workload (CO2 per workload).
+    interval = settings.SCHEDULER_INTERVAL_SECONDS
+    try:
+        interval_energy = await metrics_port.get_energy(namespace=namespace, window_seconds=interval)
+        if not isinstance(interval_energy, EnergyMeasurement):
+            interval_energy = _unavailable_energy(namespace)
+    except Exception as exc:
+        logger.warning("Interval energy unavailable for namespace=%s: %s", namespace, exc)
+        interval_energy = _unavailable_energy(namespace)
+    try:
+        raw_wl_energy = await metrics_port.get_workload_energy(namespace, window_seconds=interval)
+        wl_energy = {e.workload: e for e in raw_wl_energy if isinstance(e, WorkloadEnergy)}
+    except Exception as exc:
+        logger.warning("Workload energy unavailable for namespace=%s: %s", namespace, exc)
+        wl_energy = {}
 
-    # -------------------------------------------------------------------------
-    # Phase 3: Generate recommendations via domain engine
-    # -------------------------------------------------------------------------
-    # The engine takes pre-built domain objects, applies heuristics, returns recs.
-    # -------------------------------------------------------------------------
-    # Need at least one PodMetric to generate recs
-    if not pod_metrics:
-        logger.warning("No pod metrics for namespace=%s — skipping recommendation generation", namespace)
-        return 0
-
-    # Use first pod metric (namespace-level aggregation)
-    pod = pod_metrics[0]
-
-    rec_set: RecommendationSet = generate_all_recommendations(
-        pod=pod,
-        carbon_footprint=carbon_footprint,
-        energy_breakdown=energy_breakdown,
-        data_quality=quality,
+    # --- Phase 2: domain calculations --------------------------------------------
+    prices = dict(
         cost_per_core_hour=settings.COST_PER_VCPU_HOUR_USD,
         cost_per_gb_hour=settings.COST_PER_GB_HOUR_USD,
         cost_per_gb_month=settings.COST_PER_GB_MONTH_USD,
     )
+    requested = calculate_requested_cost(pod, storage_metrics=storage, **prices)
+    actual = calculate_monthly_cost(pod, storage_metrics=storage, **prices)
+    waste = summarize_waste(pod, requested, actual)
 
-    # -------------------------------------------------------------------------
-    # Phase 4: Persist to TimescaleDB
-    # -------------------------------------------------------------------------
-    # Save each recommendation
+    carbon = carbon_footprint_from_measurement(
+        energy,
+        team=pod.team, cost_center=pod.cost_center, environment=pod.environment,
+        pue=settings.PUE_CONSTANT,
+        grid_intensity_gco2_per_kwh=settings.GRID_CARBON_INTENSITY_GCO2_PER_KWH,
+        timestamp=now,
+    )
+    breakdown = (
+        build_energy_breakdown(namespace, energy.total_kwh or 0.0, energy.idle_kwh, now)
+        if energy.is_available else None
+    )
+
+    rec_set: RecommendationSet = generate_all_recommendations(
+        pod=pod,
+        carbon_footprint=carbon,
+        energy_breakdown=breakdown,
+        data_quality=quality,
+        workloads=workloads or None,
+        min_observation_hours=settings.MIN_OBSERVATION_HOURS,
+        **prices,
+    )
+
+    # --- Phase 3: persist ----------------------------------------------------------
+    all_saved = True
     for rec in rec_set.recommendations:
         try:
-            await storage_port.save_recommendation(rec)
+            _, action = await storage_port.upsert_recommendation(rec)
+            obs.RECOMMENDATIONS_WRITTEN.labels(cluster, str(action)).inc()
         except Exception as exc:
-            logger.error(
-                "Failed to save recommendation for namespace=%s: %s",
-                namespace,
-                exc,
-            )
+            all_saved = False
+            logger.error("Failed to save recommendation for namespace=%s: %s", namespace, exc)
 
-    # Save metric snapshot (one row per namespace per run)
-    total_cost = pod.total_cost_usd if hasattr(pod, "total_cost_usd") else 0.0
-    waste_pct = energy_breakdown.waste_pct
+    # Pending advice not produced this cycle → obsolete (condition resolved).
+    # Only when this cycle saw the namespace completely; otherwise a transient
+    # failure would wrongly close valid advice.
+    if all_saved:
+        try:
+            closed = await storage_port.mark_obsolete(
+                cluster=cluster, namespace=namespace,
+                keep_fingerprints={r.fingerprint for r in rec_set.recommendations},
+                # V3: ML recommendations have their own (hourly) producer and lifecycle.
+                exclude_categories=ML_CATEGORIES,
+            )
+            if isinstance(closed, int) and closed:
+                obs.RECOMMENDATIONS_WRITTEN.labels(cluster, "obsolete").inc(closed)
+        except Exception as exc:
+            logger.error("Failed to close obsolete recommendations for namespace=%s: %s", namespace, exc)
+
+    def savings_of(workload: str | None) -> float:
+        return round(sum(
+            r.estimated_savings_usd or 0.0
+            for r in rec_set.recommendations
+            if r.category is Category.COST_RIGHTSIZING and (workload is None or r.workload == workload)
+        ), 4)
+
+    def co2_of(kwh: float | None) -> float | None:
+        if kwh is None:
+            return None
+        return round(calculate_carbon_footprint(
+            kwh, settings.PUE_CONSTANT, settings.GRID_CARBON_INTENSITY_GCO2_PER_KWH), 9)
+
+    workload_rows = []
+    for w in workloads:
+        w_req = calculate_requested_cost(w, **prices)
+        w_act = calculate_monthly_cost(w, **prices)
+        w_waste = summarize_waste(w, w_req, w_act)
+        we = wl_energy.get(w.workload)
+        workload_rows.append(WorkloadSnapshot(
+            time=now, cluster=cluster, namespace=namespace, workload=w.workload,
+            team=w.team, cost_center=w.cost_center, environment=w.environment,
+            cpu_cores_used=w.cpu_core_hours, cpu_cores_requested=w.cpu_requested,
+            memory_gb_used=w.memory_bytes / BYTES_PER_GB, memory_gb_requested=w.memory_requested / BYTES_PER_GB,
+            requested_cost_usd=w_req.total_cost_usd, actual_cost_usd=w_act.total_cost_usd,
+            waste_cost_usd=w_waste.wasted_cost_usd, potential_savings_usd=savings_of(w.workload),
+            energy_interval_kwh=we.kwh if we else None,
+            co2_interval_kg=co2_of(we.kwh) if we else None,
+            energy_precision=we.precision if we else "unavailable",
+            energy_power_source=we.power_source.value if we else "unknown",
+            cpu_cores_used_now=w.cpu_cores_now,
+        ))
+    if workload_rows:
+        try:
+            await storage_port.save_workload_snapshots(workload_rows)
+        except Exception as exc:
+            logger.error("Failed to save workload snapshots for namespace=%s: %s", namespace, exc)
 
     snapshot = MetricSnapshot(
         time=now,
+        cluster=cluster,
         namespace=namespace,
-        team=team,
-        cost_center=cost_center,
-        environment=environment,
+        team=pod.team,
+        cost_center=pod.cost_center,
+        environment=pod.environment,
         cpu_core_hours=pod.cpu_core_hours,
-        memory_gb_hours=pod.memory_bytes / (1024**3),  # Convert bytes to GB-hours
-        cost_usd=total_cost,
-        energy_kwh=energy_kwh,
-        co2e_kg=carbon_footprint.co2_kg,
-        waste_pct=waste_pct,
+        memory_gb_hours=pod.memory_bytes / BYTES_PER_GB,
+        cost_usd=actual.total_cost_usd,  # V1 fix: was always 0.0
+        requested_cost_usd=requested.total_cost_usd,
+        waste_cost_usd=waste.wasted_cost_usd,
+        waste_pct=round(waste.waste_ratio * 100, 2),
+        potential_savings_usd=savings_of(None),
+        # NULL unless at least one PVC was really priced (seen on the live FinOps
+        # dashboard: status "unavailable" displayed next to a 0.0 cost).
+        storage_cost_usd=(
+            actual.storage_cost_usd
+            if requested.storage_status.value in ("available", "partial", "not_applicable") else None
+        ),
+        storage_status=requested.storage_status.value,
+        energy_kwh=energy.total_kwh,
+        co2e_kg=carbon.co2_kg if carbon else None,
+        idle_energy_kwh=energy.idle_kwh,
+        energy_attribution=energy.attribution.value,
+        energy_power_source=energy.power_source.value,
+        energy_scope=energy.scope,
+        energy_interval_kwh=interval_energy.total_kwh,
+        co2_interval_kg=co2_of(interval_energy.total_kwh),
+        interval_seconds=float(interval),
     )
-
     try:
         await storage_port.save_snapshot(snapshot)
     except Exception as exc:
         logger.error("Failed to save snapshot for namespace=%s: %s", namespace, exc)
 
     logger.info(
-        "Snapshot complete for namespace=%s: %d recommendations, cost=$%.2f, co2=%.3f kg",
-        namespace,
-        len(rec_set.recommendations),
-        total_cost,
-        carbon_footprint.co2_kg,
+        "Snapshot cluster=%s namespace=%s: %d recs, cost=$%.2f/month, waste=$%.2f, co2=%s kg (%s)",
+        cluster, namespace, len(rec_set.recommendations), actual.total_cost_usd,
+        waste.wasted_cost_usd, f"{carbon.co2_kg:.3f}" if carbon else "n/a", energy.attribution.value,
     )
-
     return len(rec_set.recommendations)
 
 
 # =============================================================================
-# Scheduler — the async loop (runs in FastAPI lifespan)
+# Scheduler loop (runs in the FastAPI lifespan)
 # =============================================================================
 
 
 async def start_snapshot_scheduler(
-    metrics_port: MetricsPort,
-    storage_port: StoragePort,
+    metrics_port: MetricsPort | None = None,
+    storage_port: StoragePort | None = None,
     *,
     interval_seconds: int = SNAPSHOT_INTERVAL_SECONDS,
     namespaces: Sequence[str] | None = None,
+    cluster_ports: Mapping[str, MetricsPort] | None = None,
+    leader: "LeaderElectionPort | None" = None,
 ) -> None:
-    """Start the periodic snapshot scheduler.
+    """Run a cycle every `interval_seconds` until cancelled.
 
-    Runs `run_snapshot_cycle` every `interval_seconds` until cancelled.
-    Designed to be launched as a background task in FastAPI's lifespan:
+    V2 HA: with a `leader`, a cycle only runs on the replica holding the lock —
+    N replicas behind a Service never write the same cycle N times.
 
-        @asynccontextmanager
-        async def lifespan(app: FastAPI):
-            task = asyncio.create_task(
-                start_snapshot_scheduler(metrics_port, storage_port)
-            )
-            yield
-            task.cancel()
-
-    Args:
-        metrics_port: Port for fetching telemetry.
-        storage_port: Port for persisting data.
-        interval_seconds: Seconds between cycles (default: 300 = 5 min).
-        namespaces: Optional fixed list of namespaces to process.
+    - cluster_ports: {cluster_name: MetricsPort} (V1 multicluster)
+    - metrics_port:  single-cluster shortcut (MVP signature, cluster "default")
     """
-    logger.info(
-        "Starting snapshot scheduler (interval=%ds, namespaces=%s)",
-        interval_seconds,
-        namespaces or "auto-discover",
-    )
+    if storage_port is None:
+        raise ValueError("storage_port is required")
+    ports = dict(cluster_ports) if cluster_ports else {"default": metrics_port}
+    if any(p is None for p in ports.values()):
+        raise ValueError("metrics_port or cluster_ports is required")
+    logger.info("Starting snapshot scheduler (interval=%ds, clusters=%s)", interval_seconds, list(ports))
 
     while True:
         try:
-            rec_count = await run_snapshot_cycle(
-                metrics_port=metrics_port,
-                storage_port=storage_port,
-                namespaces=namespaces,
-            )
-            logger.info(
-                "Snapshot cycle complete: %d recommendations generated",
-                rec_count,
-            )
+            if leader is not None and not await leader.try_acquire():
+                obs.SCHEDULER_SKIPPED_NOT_LEADER.inc()
+                logger.debug("not the leader — cycle skipped")
+            else:
+                count = await run_multicluster_cycle(ports, storage_port, namespaces=namespaces)
+                logger.info("Snapshot cycle complete: %d recommendations generated", count)
         except Exception as exc:
-            # This should never happen (run_snapshot_cycle catches per-namespace errors).
-            # But if something truly unexpected occurs, log and continue.
-            logger.critical(
-                "Snapshot cycle failed unexpectedly: %s",
-                exc,
-                exc_info=True,
-            )
-
+            logger.critical("Snapshot cycle failed unexpectedly: %s", exc, exc_info=True)
         await asyncio.sleep(interval_seconds)
-
-
-# =============================================================================
-# Standalone entry point (for OpenShift CronJob or manual testing)
-# =============================================================================
 
 
 async def run_once(
@@ -325,19 +441,7 @@ async def run_once(
     storage_port: StoragePort,
     *,
     namespaces: Sequence[str] | None = None,
+    cluster: str = "default",
 ) -> int:
-    """Run a single snapshot cycle and return.
-
-    Used for:
-    - OpenShift CronJob (extract this into a script)
-    - Manual testing from CLI
-    - One-off backfill
-
-    Returns:
-        Number of recommendations generated.
-    """
-    return await run_snapshot_cycle(
-        metrics_port=metrics_port,
-        storage_port=storage_port,
-        namespaces=namespaces,
-    )
+    """Single cycle for one cluster (CronJob / CLI / backfill)."""
+    return await run_snapshot_cycle(metrics_port, storage_port, namespaces=namespaces, cluster=cluster)

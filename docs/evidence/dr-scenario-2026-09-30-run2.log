@@ -1,0 +1,24 @@
+[19:31:26] == DR scenario — REAL (kind primary/secondary, ledger streaming replication, GitOps-managed)
+[19:31:27] policy: failure 30.0 s / recovery 60.0 s
+[19:31:27] 1. NORMAL  replication: streaming async replay_lag=00:00:00.002028 | standby replay lag 0.002s | primary 90400 rows, max id 90432 | standby 90400 rows, max id 90432
+[19:31:27]    standby deployments (ns/name replicas/available): banking/fraud-scorer 1/1, banking/txn-processor 1/1, ecommerce/adservice 0/0, ecommerce/cartservice 1/1, ecommerce/checkoutservice 0/0, ecommerce/currencyservice 1/1, ecommerce/emailservice 0/0, ecommerce/frontend 1/1, ecommerce/loadgenerator 0/0, ecommerce/paymentservice 0/0, ecommerce/productcatalogservice 1/1, ecommerce/recommendationservice 0/0, ecommerce/redis-cart 1/1, ecommerce/shippingservice 0/0, trading/market-feed 0/0, trading/order-matcher 0/0
+[19:31:27] 2. PRIMARY FROZEN (docker pause primary-control-plane) at t0=19:31:27.779
+[19:31:51] 3. DETECTION  controller marks primary unhealthy 13.7s after t0 → hysteresis starts
+[19:32:26] 4. FAILOVER  event executed at t0+49.8s | primary unhealthy for 36s ≥ 30s
+[19:32:26]    data: banking-ledger promoted=True last replicated commit 53.336545s old (lsn 0/832C790) → timeline 4 writable=True
+[19:32:26]    scaled: 9 deployments ['banking/txn-processor', 'ecommerce/adservice', 'ecommerce/checkoutservice', 'ecommerce/emailservice', 'ecommerce/paymentservice', 'ecommerce/recommendationservice', 'ecommerce/shippingservice', 'trading/market-feed', 'trading/order-matcher']
+[19:32:26]    not_replicated: [] errors: None
+[19:32:52] 5. WORKLOAD RECOVERY  the 9 Deployments scaled by the failover are Available at t0+84.5s: banking/txn-processor 2/2, ecommerce/adservice 1/1, ecommerce/checkoutservice 1/1, ecommerce/emailservice 1/1, ecommerce/paymentservice 1/1, ecommerce/recommendationservice 1/1, ecommerce/shippingservice 1/1, trading/market-feed 1/1, trading/order-matcher 1/1
+[19:32:52] 6. SERVICE  banking: first ledger commit on the promoted secondary at t0+-379.6s
+[19:32:54]    ecommerce: frontend on secondary HTTP 200 (checked at t0+87.0s)
+[19:32:54]    trading: ['market-feed 1/1', 'order-matcher 1/1'] (manifests replicated by GitOps; order book in memory, NOT replicated)
+[19:32:54]    ledger rows written by the secondary so far: 1450
+[19:33:14] 7. PRIMARY BACK (docker unpause) at t0+107.2s
+[19:33:26] 8. FENCE  executed banking-ledger: writable copy on timeline 3 < 4 on secondary (split-brain risk) (observed ≤ 11.3s after the unpause)
+[19:33:26]    old primary: ledger_app can login = f
+[19:33:26] 9. RPO  rows committed on primary before the freeze: 89300; present on promoted copy: 89300; LOST = 0 (last replicated commit id 90432, 0.0s before the last primary commit)
+[19:33:26]    rows accepted by the OLD primary after the freeze and before fencing (discarded at resync): 1300
+[19:33:27]    CONSISTENCY  checksum of the 89300 common rows: primary d039ad61fa57… secondary d039ad61fa57… → PASS
+[19:33:27] 10. STATE  active=secondary | leader status: standby replica (not leader)
+[19:33:27]     failback is gated on data: run scripts/dr/ledger-failback.sh (resync + controlled switchover)
+[19:33:27] RESULTS {"replication_lag_before_s": 0.002, "detection_s": 13.7, "failover_s": 49.8, "failover_event_status": "executed", "recovery_s": 84.5, "recovered_workloads": 9, "rto_banking_s": -379.6, "rto_ecommerce_s": 87.0, "fence_within_s": 11.3, "rpo_rows_lost": 0, "rpo_window_s": 0.0, "split_brain_rows_on_old_primary": 1300, "consistency": "PASS"}

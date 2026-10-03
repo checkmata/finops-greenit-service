@@ -1,0 +1,31 @@
+# Sized for the REAL local clusters (minikube KVM VMs: primary 4 vCPU/5 GiB,
+# secondary 2 vCPU/3 GiB). Requests keep deliberate FinOps signals:
+# over-reservation (txn-processor) and under-reservation (order-matcher).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+replicas:
+  - {name: order-matcher, count: 1}
+  - {name: market-feed, count: 1}
+patches:
+  - target: {kind: Deployment, name: order-matcher}
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value: {requests: {cpu: "150m", memory: "256Mi"}, limits: {memory: "256Mi"}}
+  - target: {kind: Deployment, name: market-feed}
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value: {requests: {cpu: "100m", memory: "128Mi"}, limits: {memory: "128Mi"}}
+  - target: {kind: Deployment, name: order-matcher}
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env
+        value: [{name: ORDERS_PER_SECOND, value: "2500"}]
+  - target: {kind: Deployment, name: market-feed}
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env
+        value: [{name: ORDERS_PER_SECOND, value: "200"}]

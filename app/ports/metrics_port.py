@@ -25,7 +25,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+from app.domain.models.cluster import DeploymentAvailability
 from app.domain.models.data_quality import DataQuality
+from app.domain.models.energy import EnergyMeasurement, WorkloadEnergy
 from app.domain.models.pod_metric import (
     ClusterAllocatable,
     PodMetric,
@@ -137,3 +139,65 @@ class MetricsPort(ABC):
         Returns:
             Energy consumption in kilowatt-hours (kWh) for the last 24 hours.
         """
+
+    # ------------------------------------------------------------------
+    # V1 additions
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def ping(self) -> bool:
+        """True if the metrics backend answers at all.
+
+        WHY (V1): check_data_quality() degrades gracefully (empty set when
+        Prometheus is unreachable), so /health could not tell "Prometheus down"
+        from "all sources down". ping() is the transport-level truth.
+        """
+
+    @abstractmethod
+    async def list_namespaces(self) -> list[str]:
+        """Namespaces that currently have containers with resource requests.
+
+        PromQL: count by (namespace) (kube_pod_container_resource_requests)
+        Selection/filtering is domain logic (namespace_selection.py).
+        """
+
+    @abstractmethod
+    async def get_workload_metrics(
+        self,
+        namespace: str,
+        namespace_total: PodMetric | None = None,
+    ) -> list[PodMetric]:
+        """Per-workload breakdown of get_pod_metrics() (one PodMetric per workload).
+
+        Workload = value of the configured pod label (default `app`), joined via
+        kube_pod_labels. Usage that cannot be attributed (unlabelled pods) is
+        returned as workload "_unattributed" so that Σ workloads == namespace total.
+        Returns [] when no pod carries the workload label.
+        """
+
+    @abstractmethod
+    async def get_workload_energy(self, namespace: str, window_seconds: int = 86400) -> list[WorkloadEnergy]:
+        """V2 — energy per WORKLOAD (and per pod) over the window.
+
+        Kepler series are per container (pod_name, container_namespace); they are
+        joined to kube_pod_labels to find each pod's workload label.
+        [] when no per-container energy exists (node-level only / no Kepler).
+        """
+
+    @abstractmethod
+    async def get_energy(self, namespace: str, window_seconds: int = 86400) -> EnergyMeasurement:
+        """Energy of the namespace over 24 h WITH provenance.
+
+        Hierarchy: container → pod → node × CPU share (estimated) → unavailable.
+        Never raises for "no data": returns attribution=UNAVAILABLE instead.
+        """
+
+    @abstractmethod
+    async def get_deployment_availability(self) -> list[DeploymentAvailability]:
+        """Desired vs available replicas of every Deployment (failover input).
+
+        PromQL (metrics-reference.md FinOps P1):
+        - kube_deployment_spec_replicas
+        - kube_deployment_status_replicas_available
+        """
+

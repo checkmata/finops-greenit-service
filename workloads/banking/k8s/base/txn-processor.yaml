@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: txn-processor
+  namespace: banking
+  labels: {app: txn-processor, app.kubernetes.io/part-of: banking}
+spec:
+  replicas: 3
+  selector:
+    matchLabels: {app: txn-processor}
+  template:
+    metadata:
+      labels:
+        app: txn-processor
+        # Attribution labels read by the service through kube_pod_labels
+        # (kube-state-metrics must allow-list them: see scripts/k8s/values-kube-prometheus-stack.yaml)
+        team: payments
+        cost-center: cc-banking
+        environment: prod
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      securityContext: {runAsNonRoot: true}
+      containers:
+        - name: txn-processor
+          image: finops-demo/banking:local
+          imagePullPolicy: IfNotPresent
+          ports: [{containerPort: 8080, name: metrics}]
+          env:
+            - name: TPS
+              value: "150"
+            - name: WORK_ROUNDS
+              value: "150"
+          resources:
+            requests: {cpu: "1", memory: "1Gi"}
+            limits: {memory: "1Gi"}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: ledger-db

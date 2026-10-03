@@ -1,0 +1,25 @@
+# Google Online Boutique (GoogleCloudPlatform/microservices-demo, Apache-2.0),
+# 11 microservices + a load generator that produces realistic shopping traffic.
+# Pinned release. VERIFY the tag exists before use:
+#   https://github.com/GoogleCloudPlatform/microservices-demo/releases
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ecommerce
+resources:
+  - namespace.yaml
+  - https://raw.githubusercontent.com/GoogleCloudPlatform/microservices-demo/v0.10.1/release/kubernetes-manifests.yaml
+# Attribution labels on pod templates only (selectors untouched).
+labels:
+  - pairs:
+      team: digital
+      cost-center: cc-ecommerce
+      environment: prod
+    includeSelectors: false
+    includeTemplates: true
+patches:
+  # frontend-external is a LoadBalancer upstream; not needed on kind.
+  - target: {kind: Service, name: frontend-external}
+    patch: |-
+      - op: replace
+        path: /spec/type
+        value: ClusterIP

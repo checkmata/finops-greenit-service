@@ -1,0 +1,64 @@
+# Sized for the REAL local clusters (minikube KVM VMs: primary 4 vCPU/5 GiB,
+# secondary 2 vCPU/3 GiB). Requests keep deliberate FinOps signals:
+# over-reservation (txn-processor) and under-reservation (order-matcher).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+replicas:
+  - {name: txn-processor, count: 2}
+  - {name: fraud-scorer, count: 1}
+patches:
+  - target: {kind: Deployment, name: txn-processor}
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value: {requests: {cpu: "400m", memory: "256Mi"}, limits: {memory: "256Mi"}}
+  - target: {kind: Deployment, name: fraud-scorer}
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value: {requests: {cpu: "300m", memory: "192Mi"}, limits: {memory: "192Mi"}}
+  - target: {kind: Deployment, name: txn-processor}
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env
+        value: [{name: TPS, value: "60"}, {name: WORK_ROUNDS, value: "100"}]
+  - target: {kind: Deployment, name: fraud-scorer}
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env
+        value: [{name: TPS, value: "40"}, {name: WORK_ROUNDS, value: "1500"}]
+  # V2.x: txn-processor writes every transaction to the replicated ledger.
+  - target: {kind: Deployment, name: txn-processor}
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: {name: txn-processor, namespace: banking}
+      spec:
+        template:
+          spec:
+            containers:
+              - name: txn-processor
+                env:
+                  - {name: CLUSTER_NAME, value: primary}
+                  - {name: LEDGER_HOST, value: ledger-db}
+                  - {name: LEDGER_USER, value: ledger_app}
+                  - name: LEDGER_PASSWORD
+                    valueFrom: {secretKeyRef: {name: ledger-db-credentials, key: APP_PASSWORD, optional: true}}
+  # Ledger role of this cluster (base/ledger-db.yaml). A volume is rebuilt from
+  # LEDGER_SOURCE_HOST only when role=standby AND the generation changes.
+  - target: {kind: StatefulSet, name: ledger-db}
+    patch: |-
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata: {name: ledger-db, namespace: banking}
+      spec:
+        template:
+          spec:
+            containers:
+              - name: postgres
+                env:
+                  - {name: LEDGER_ROLE, value: primary}
+                  - {name: LEDGER_SOURCE_HOST, value: secondary-control-plane}
+                  - {name: LEDGER_RESYNC_GENERATION, value: "3"}

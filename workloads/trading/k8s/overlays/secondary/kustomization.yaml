@@ -1,0 +1,11 @@
+# V2.x — trading is REPLICATED to the standby (manifests only): same images and
+# configuration as primary, 0 replicas (cold standby). The failover controller
+# scales it up on failover. State: the order book is in memory → not replicated
+# (RPO = everything since the last restart; see docs/REPLICATION.md).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../primary
+replicas:
+  - {name: order-matcher, count: 0}
+  - {name: market-feed, count: 0}

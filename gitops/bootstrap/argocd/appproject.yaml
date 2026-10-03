@@ -1,0 +1,18 @@
+# Restricted project (core mode creates no `default` project, and we would not want
+# its "anything anywhere" scope anyway): only our Git repo, our two clusters, our
+# namespaces, and the only cluster-scoped kind our manifests contain (Namespace).
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: finops
+  namespace: argocd
+spec:
+  description: FinOps/GreenIT platform workloads and in-cluster components
+  sourceRepos: [http://gitea:3000/finops/platform-gitops.git]
+  destinations:
+    - {name: primary, namespace: '*'}
+    - {name: secondary, namespace: '*'}
+  clusterResourceWhitelist:
+    - {group: '', kind: Namespace}
+  namespaceResourceWhitelist:
+    - {group: '*', kind: '*'}

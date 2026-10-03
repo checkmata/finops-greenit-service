@@ -1,188 +1,113 @@
 """
-Health router — FastAPI endpoints for liveness/readiness probes.
+Health endpoints.
 
-Endpoints:
-- GET /health → comprehensive health check (Prometheus + Database)
+- GET /health/live → liveness: the process answers. Never depends on external
+  systems (restarting our pod does not fix a down Prometheus).
+- GET /health      → readiness with per-dependency detail.
 
-WHY a dedicated health router:
-- Kubernetes/OpenShift probes need a simple endpoint to check service health
-- Different components can fail independently (Prometheus down vs DB down)
-- Operators need to know WHICH dependency failed, not just "something is wrong"
-- The health endpoint must NOT depend on the domain layer (it's infrastructure)
-
-WHY check both Prometheus and Database:
-- If Prometheus is down: the service can't fetch live metrics (read-only failure)
-- If Database is down: the service can't store/retrieve historical data
-- Both are critical for the service to function correctly
-- Returning which one failed helps operators diagnose quickly
+V1 changes:
+- Prometheus is checked with ping() (transport truth). The MVP used
+  check_data_quality(), which swallows connection errors → always "healthy".
+- Multicluster: every cluster's Prometheus is checked.
+    healthy   → DB ok and every cluster reachable                    (200)
+    degraded  → DB ok, at least one cluster reachable, some are not   (200)
+    unhealthy → DB down, or no cluster reachable                     (503)
+  WHY "degraded" is 200: losing ONE observed cluster is exactly the failover
+  scenario the service must keep reporting on.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 
-from app.adapters.outbound.prometheus_adapter import (
-    PrometheusMetricsAdapter,
-    PrometheusUnavailableError,
-)
-from app.adapters.outbound.timescale_adapter import TimescaleAdapter
+from app.adapters.inbound.api.dependencies import get_cluster_registry, get_metrics_port, get_storage_port
+from app.cluster_registry import ClusterRegistry
 from app.config import settings
-from app.ports.metrics_port import MetricsPort
 from app.ports.storage_port import StoragePort
+
+__all__ = ["router", "get_metrics_port", "get_storage_port", "get_cluster_registry"]
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["health"])
 
 
-# =============================================================================
-# Dependency injection
-# =============================================================================
-
-
-def get_metrics_port() -> MetricsPort:
-    """FastAPI dependency: returns the Prometheus metrics adapter."""
-    return PrometheusMetricsAdapter(
-        prometheus_url=settings.PROMETHEUS_URL,
-        timeout_seconds=settings.PROMETHEUS_QUERY_TIMEOUT_SECONDS,
-    )
-
-
-def get_storage_port() -> StoragePort:
-    """FastAPI dependency: returns the TimescaleDB storage adapter."""
-    return TimescaleAdapter(database_url=settings.DATABASE_URL)
-
-
-# =============================================================================
-# Health check logic
-# =============================================================================
-
-
-async def check_prometheus_health(metrics: MetricsPort) -> dict:
-    """Check if Prometheus is reachable.
-
-    Returns:
-        Dict with status ("healthy" or "unhealthy") and details.
-    """
+async def _ping(name: str, port) -> dict:
     try:
-        # Try a lightweight query to check connectivity
-        # We query a simple metric that should always exist
-        await metrics.check_data_quality()
-        return {
-            "status": "healthy",
-            "component": "prometheus",
-            "url": settings.PROMETHEUS_URL,
-        }
-    except PrometheusUnavailableError as exc:
-        return {
-            "status": "unhealthy",
-            "component": "prometheus",
-            "url": settings.PROMETHEUS_URL,
-            "error": str(exc),
-        }
+        ok = bool(await port.ping())
+        return {"cluster": name, "status": "healthy" if ok else "unhealthy",
+                **({} if ok else {"error": "Prometheus did not answer"})}
     except Exception as exc:
-        return {
-            "status": "unhealthy",
-            "component": "prometheus",
-            "url": settings.PROMETHEUS_URL,
-            "error": f"Unexpected error: {exc}",
-        }
+        return {"cluster": name, "status": "unhealthy", "error": f"Unexpected error: {exc}"}
+
+
+async def check_prometheus_health(registry: ClusterRegistry) -> dict:
+    results = await asyncio.gather(*(_ping(n, p) for n, p in registry.ports().items()))
+    healthy = [r for r in results if r["status"] == "healthy"]
+    status = "healthy" if len(healthy) == len(results) else ("degraded" if healthy else "unhealthy")
+    return {"status": status, "component": "prometheus", "clusters": list(results)}
 
 
 async def check_database_health(storage: StoragePort) -> dict:
-    """Check if the database is reachable.
-
-    Returns:
-        Dict with status ("healthy" or "unhealthy") and details.
-    """
+    target = settings.DATABASE_URL.split("@")[-1] if "@" in settings.DATABASE_URL else "configured"
     try:
-        # Try a lightweight query to check connectivity
-        # We list recommendations with limit=1 to verify DB is accessible
         await storage.list_recommendations(limit=1)
-        return {
-            "status": "healthy",
-            "component": "database",
-            "url": settings.DATABASE_URL.split("@")[-1] if "@" in settings.DATABASE_URL else "configured",
-        }
+        return {"status": "healthy", "component": "database", "url": target}
     except Exception as exc:
-        return {
-            "status": "unhealthy",
-            "component": "database",
-            "url": settings.DATABASE_URL.split("@")[-1] if "@" in settings.DATABASE_URL else "configured",
-            "error": str(exc),
-        }
+        return {"status": "unhealthy", "component": "database", "url": target, "error": str(exc)}
 
 
-# =============================================================================
-# GET /health — comprehensive health check
-# =============================================================================
+@router.get("/health/live", summary="Liveness probe", response_model=None)
+async def liveness() -> dict:
+    return {"status": "alive"}
 
 
 @router.get(
-    "/health",
-    summary="Health check for liveness/readiness probes",
-    description="Checks connectivity to Prometheus and TimescaleDB. Returns which dependencies are healthy/unhealthy.",
+    "/health/ready",
+    summary="Readiness: can the service do its job right now?",
     response_model=None,
-    responses={
-        200: {"description": "All dependencies healthy"},
-        503: {"description": "One or more dependencies unhealthy"},
-    },
+    responses={200: {"description": "healthy or degraded"}, 503: {"description": "unhealthy"}},
+)
+@router.get(
+    "/health",
+    summary="Readiness (alias of /health/ready, kept for MVP clients)",
+    response_model=None,
+    responses={200: {"description": "healthy or degraded"}, 503: {"description": "unhealthy"}},
 )
 async def health_check(
-    metrics: Annotated[MetricsPort, Depends(get_metrics_port)],
+    request: Request,
+    registry: Annotated[ClusterRegistry, Depends(get_cluster_registry)],
     storage: Annotated[StoragePort, Depends(get_storage_port)],
-) -> dict:
-    """Health check endpoint for Kubernetes/OpenShift probes.
-
-    Checks connectivity to:
-    1. Prometheus (metrics source)
-    2. TimescaleDB (storage backend)
-
-    Returns detailed status for each dependency so operators can:
-    - See which component failed (Prometheus vs Database)
-    - Understand why it failed (error message)
-    - Make informed decisions about service readiness
-
-    Args:
-        metrics: MetricsPort dependency (injected by FastAPI)
-        storage: StoragePort dependency (injected by FastAPI)
-
-    Returns:
-        JSON response with overall status and per-component details.
-    """
-    start_time = time.time()
-
-    # Check both dependencies concurrently
-    import asyncio
-    prometheus_check, database_check = await asyncio.gather(
-        check_prometheus_health(metrics),
-        check_database_health(storage),
+) -> JSONResponse:
+    start = time.time()
+    prometheus, database = await asyncio.gather(
+        check_prometheus_health(registry), check_database_health(storage)
     )
-
-    elapsed_ms = (time.time() - start_time) * 1000
-
-    # Determine overall status
-    all_healthy = (
-        prometheus_check["status"] == "healthy"
-        and database_check["status"] == "healthy"
-    )
-
-    response = {
-        "status": "healthy" if all_healthy else "unhealthy",
+    if database["status"] != "healthy" or prometheus["status"] == "unhealthy":
+        overall = "unhealthy"
+    elif prometheus["status"] == "degraded":
+        overall = "degraded"
+    else:
+        overall = "healthy"
+    body = {
+        "status": overall,
         "timestamp": time.time(),
-        "elapsed_ms": round(elapsed_ms, 2),
-        "components": {
-            "prometheus": prometheus_check,
-            "database": database_check,
-        },
+        "elapsed_ms": round((time.time() - start) * 1000, 2),
+        "components": {"prometheus": prometheus, "database": database},
     }
+    # V2 HA: which replica writes. A follower is fully READY (it serves the API);
+    # it just does not run the scheduler/failover loop.
+    container = getattr(request.app.state, "container", None)
+    leader = getattr(container, "leader", None)
+    if leader is not None:
+        from app import observability as obs
 
-    # Return 503 if any component is unhealthy
-    from fastapi.responses import JSONResponse
-
-    status_code = 200 if all_healthy else 503
-    return JSONResponse(content=response, status_code=status_code)
+        obs.IS_LEADER.set(1 if leader.is_leader else 0)
+        body["replica"] = {"is_leader": leader.is_leader}
+    return JSONResponse(content=body, status_code=503 if overall == "unhealthy" else 200)

@@ -1,0 +1,422 @@
+{
+  "uid": "finops-greenit",
+  "title": "FinOps/GreenIT \u2014 3. Green IT",
+  "description": "Energy and CO\u2082 with their provenance (measured vs estimated).",
+  "tags": [
+    "finops-greenit"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "cluster",
+        "type": "query",
+        "datasource": {
+          "type": "postgres",
+          "uid": "timescaledb"
+        },
+        "query": "SELECT DISTINCT cluster FROM metric_snapshots ORDER BY 1",
+        "definition": "SELECT DISTINCT cluster FROM metric_snapshots ORDER BY 1",
+        "multi": true,
+        "includeAll": true,
+        "allValue": null,
+        "refresh": 2,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "namespace",
+        "type": "query",
+        "datasource": {
+          "type": "postgres",
+          "uid": "timescaledb"
+        },
+        "query": "SELECT DISTINCT namespace FROM metric_snapshots WHERE cluster IN ($cluster) ORDER BY 1",
+        "definition": "SELECT DISTINCT namespace FROM metric_snapshots WHERE cluster IN ($cluster) ORDER BY 1",
+        "multi": true,
+        "includeAll": true,
+        "allValue": null,
+        "refresh": 2,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 18,
+      "title": "Energy, last 24 h (kWh)",
+      "type": "stat",
+      "description": "",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 8,
+        "h": 4
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "rawSql": "SELECT SUM(energy_kwh) FROM (SELECT DISTINCT ON (cluster, namespace) * FROM metric_snapshots\n   WHERE $__timeFilter(time) AND cluster IN ($cluster) AND namespace IN ($namespace) ORDER BY cluster, namespace, time DESC) l",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "custom": {},
+          "unit": "kwatth"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 19,
+      "title": "CO\u2082, last 24 h (kg)",
+      "type": "stat",
+      "description": "kWh \u00d7 PUE \u00d7 grid intensity / 1000 (constants in config).",
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 8,
+        "h": 4
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "rawSql": "SELECT SUM(co2e_kg) FROM (SELECT DISTINCT ON (cluster, namespace) * FROM metric_snapshots\n   WHERE $__timeFilter(time) AND cluster IN ($cluster) AND namespace IN ($namespace) ORDER BY cluster, namespace, time DESC) l",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "custom": {},
+          "unit": "masskg"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 20,
+      "title": "Namespaces with ESTIMATED energy",
+      "type": "stat",
+      "description": "Estimated = Kepler power MODEL (no hardware counters) or node-level share. Measured = RAPL package+dram attributed per container.",
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 8,
+        "h": 4
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "rawSql": "SELECT COUNT(*) FROM (SELECT DISTINCT ON (cluster, namespace) * FROM metric_snapshots\n   WHERE $__timeFilter(time) AND cluster IN ($cluster) AND namespace IN ($namespace) ORDER BY cluster, namespace, time DESC) l\nWHERE energy_attribution = 'node_cpu_share' OR energy_power_source = 'model'",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 21,
+      "title": "Energy over time, by namespace",
+      "type": "timeseries",
+      "description": "",
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "rawSql": "SELECT bucket AS time, cluster || '/' || namespace AS metric, SUM(v) AS value FROM (\n  SELECT time_bucket('$__interval'::interval, time) AS bucket, cluster, namespace, AVG(energy_kwh) AS v\n  FROM metric_snapshots WHERE $__timeFilter(time) AND cluster IN ($cluster) AND namespace IN ($namespace) AND energy_kwh IS NOT NULL\n  GROUP BY 1, 2, 3) s\nGROUP BY 1, 2 ORDER BY 1",
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "kwatth"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 22,
+      "title": "CO\u2082 over time, by namespace",
+      "type": "timeseries",
+      "description": "",
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "rawSql": "SELECT bucket AS time, cluster || '/' || namespace AS metric, SUM(v) AS value FROM (\n  SELECT time_bucket('$__interval'::interval, time) AS bucket, cluster, namespace, AVG(co2e_kg) AS v\n  FROM metric_snapshots WHERE $__timeFilter(time) AND cluster IN ($cluster) AND namespace IN ($namespace) AND co2e_kg IS NOT NULL\n  GROUP BY 1, 2, 3) s\nGROUP BY 1, 2 ORDER BY 1",
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "masskg"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 23,
+      "title": "Energy provenance (latest)",
+      "type": "table",
+      "description": "Wh and g (small local clusters). idle empty = not measurable with this Kepler exposure; no ENERGY_WASTE advice is emitted then.",
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "rawSql": "SELECT cluster, namespace,\n  CASE WHEN energy_kwh IS NULL THEN 'unavailable'\n       WHEN energy_power_source = 'hardware' AND energy_attribution IN ('container','pod') THEN 'measured'\n       ELSE 'estimated' END AS precision,\n  energy_power_source AS power_source, energy_scope AS scope, energy_attribution AS attribution,\n  ROUND((energy_kwh * 1000)::numeric, 3) AS energy_wh, ROUND((idle_energy_kwh * 1000)::numeric, 3) AS idle_wh,\n  ROUND((co2e_kg * 1000)::numeric, 3) AS co2_g FROM (SELECT DISTINCT ON (cluster, namespace) * FROM metric_snapshots\n   WHERE $__timeFilter(time) AND cluster IN ($cluster) AND namespace IN ($namespace) ORDER BY cluster, namespace, time DESC) l ORDER BY 1, 2",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 24,
+      "title": "CO\u2082 per workload (per cycle, g)",
+      "type": "timeseries",
+      "description": "Kepler per container, joined to the pod's app label. Sum of per-cycle amounts (exact).",
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 24,
+        "h": 9
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "rawSql": "SELECT time_bucket('$__interval'::interval, time) AS time,\n  cluster || '/' || namespace || '/' || workload AS metric, sum(co2_interval_kg) * 1000 AS value\nFROM workload_snapshots WHERE $__timeFilter(time) AND cluster IN ($cluster) AND namespace IN ($namespace)\n  AND co2_interval_kg IS NOT NULL GROUP BY 1, 2 ORDER BY 1",
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "unit": "massg"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 25,
+      "title": "Energy & CO\u2082 per workload \u2014 period total",
+      "type": "table",
+      "description": "",
+      "gridPos": {
+        "x": 0,
+        "y": 29,
+        "w": 24,
+        "h": 10
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescaledb"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "timescaledb"
+          },
+          "rawSql": "SELECT cluster, namespace, workload,\n  max(energy_precision) AS precision, max(energy_power_source) AS power_source,\n  ROUND((sum(energy_interval_kwh) * 1000)::numeric, 3) AS energy_wh, ROUND((sum(co2_interval_kg) * 1000)::numeric, 3) AS co2_g\nFROM workload_snapshots WHERE $__timeFilter(time) AND cluster IN ($cluster) AND namespace IN ($namespace)\n  AND energy_interval_kwh IS NOT NULL GROUP BY 1, 2, 3 ORDER BY co2_g DESC",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {}
+    }
+  ]
+}

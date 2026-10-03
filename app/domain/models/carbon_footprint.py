@@ -16,6 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from app.domain.models.energy import EnergyAttribution, PowerSource
+
 
 @dataclass(frozen=True)
 class CarbonFootprint:
@@ -53,6 +55,17 @@ class CarbonFootprint:
     # --- metadata ---
     timestamp: datetime
 
+    # --- provenance (V1) ---
+    # WHY: a CO2 value derived from a node-level fallback is an estimate and
+    # must be presented as such. Default keeps older call sites valid.
+    energy_attribution: EnergyAttribution = EnergyAttribution.CONTAINER
+    # V2: hardware counters vs Kepler power model (see PowerSource)
+    energy_power_source: PowerSource = PowerSource.UNKNOWN
+
+    @property
+    def is_estimated(self) -> bool:
+        return (not self.energy_attribution.is_measured) or self.energy_power_source is PowerSource.MODEL
+
     @property
     def co2_grams(self) -> float:
         """Convenience: CO2 in grams for human-readable reports."""
@@ -84,17 +97,27 @@ class EnergyBreakdown:
 
     namespace: str
     total_energy_kwh: float
-    idle_waste_kwh: float
+    # None = NOT MEASURED (V1). The MVP hard-coded 0.0, which looked like
+    # "no idle waste" when it really meant "we don't know".
+    idle_waste_kwh: float | None
     timestamp: datetime
 
     @property
-    def active_energy_kwh(self) -> float:
-        """Energy consumed by actual workload (total minus idle waste)."""
+    def idle_is_known(self) -> bool:
+        return self.idle_waste_kwh is not None
+
+    @property
+    def active_energy_kwh(self) -> float | None:
+        """Energy consumed by actual workload (total minus idle), None if idle unknown."""
+        if self.idle_waste_kwh is None:
+            return None
         return max(0.0, self.total_energy_kwh - self.idle_waste_kwh)
 
     @property
-    def waste_pct(self) -> float:
-        """Percentage of energy wasted on idle resources."""
+    def waste_pct(self) -> float | None:
+        """Percentage of energy spent idle, None if idle unknown."""
+        if self.idle_waste_kwh is None:
+            return None
         if self.total_energy_kwh == 0:
             return 0.0
         return (self.idle_waste_kwh / self.total_energy_kwh) * 100.0

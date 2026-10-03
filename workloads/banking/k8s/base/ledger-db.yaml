@@ -1,0 +1,144 @@
+# V2.x — banking ledger: PostgreSQL 16 with REAL cross-cluster streaming replication.
+#
+#   primary   cluster: LEDGER_ROLE=primary  → normal PostgreSQL, WAL senders enabled
+#   secondary cluster: LEDGER_ROLE=standby  → hot standby fed by pg_basebackup + streaming
+#                      from <primary node>:30432 (NodePort on the shared `kind` network)
+#
+# Safety rule: a data directory is NEVER wiped because of a role alone. It is rebuilt
+# from the source only when LEDGER_ROLE=standby AND LEDGER_RESYNC_GENERATION differs
+# from the generation recorded in the volume — i.e. an explicit, reviewed Git change
+# (docs/REPLICATION.md, scripts/dr/ledger-failback.sh). A standby promoted by the
+# failover controller therefore stays primary across restarts.
+#
+# Credentials: Secret `ledger-db-credentials` (NOT in Git), created by
+# scripts/dr/make-ledger-secrets.sh with the same values on both clusters.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ledger-db-scripts
+  namespace: banking
+data:
+  entry.sh: |
+    #!/bin/sh
+    set -eu
+    ROOT=/var/lib/postgresql/data
+    export PGDATA=$ROOT/pgdata
+    GEN_FILE=$ROOT/resync-generation
+    if [ "$LEDGER_ROLE" = standby ]; then
+      CUR=$(cat "$GEN_FILE" 2>/dev/null || echo none)
+      if [ ! -s "$PGDATA/PG_VERSION" ] || [ "$CUR" != "$LEDGER_RESYNC_GENERATION" ]; then
+        echo "ledger: resync from $LEDGER_SOURCE_HOST:$LEDGER_SOURCE_PORT (generation $LEDGER_RESYNC_GENERATION, volume had $CUR)"
+        rm -rf "$PGDATA"
+        until PGPASSWORD="$REPLICATION_PASSWORD" pg_basebackup -h "$LEDGER_SOURCE_HOST" -p "$LEDGER_SOURCE_PORT" \
+              -U replicator -D "$PGDATA" -R -X stream -c fast; do
+          echo "ledger: source not reachable yet, retrying in 5 s"; rm -rf "$PGDATA"; sleep 5
+        done
+        echo "$LEDGER_RESYNC_GENERATION" > "$GEN_FILE"
+        chown -R postgres:postgres "$ROOT"; chmod 700 "$PGDATA"
+      fi
+    fi
+    exec docker-entrypoint.sh postgres -c wal_keep_size=512MB -c max_wal_senders=5 \
+      -c hot_standby=on -c wal_log_hints=on
+  init-ledger.sh: |
+    #!/bin/sh
+    # Runs once, at initdb of the ORIGINAL primary only (a standby gets it all by base backup).
+    set -eu
+    psql -v ON_ERROR_STOP=1 --username postgres --dbname ledger <<SQL
+    CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD '$REPLICATION_PASSWORD';
+    CREATE ROLE ledger_app WITH LOGIN PASSWORD '$APP_PASSWORD';
+    CREATE TABLE ledger (
+      id         bigserial PRIMARY KEY,
+      origin     text        NOT NULL,          -- cluster that accepted the write
+      src        text        NOT NULL,
+      dst        text        NOT NULL,
+      amount     numeric(14,2) NOT NULL,
+      channel    text        NOT NULL,
+      pattern    text        NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+    );
+    CREATE INDEX ledger_created_at ON ledger (created_at);
+    GRANT SELECT, INSERT ON ledger TO ledger_app;
+    GRANT USAGE ON SEQUENCE ledger_id_seq TO ledger_app;
+    SQL
+    echo "host replication replicator all scram-sha-256" >> "$PGDATA/pg_hba.conf"
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ledger-db
+  namespace: banking
+  labels: {app: ledger-db, app.kubernetes.io/part-of: banking}
+spec:
+  serviceName: ledger-db
+  replicas: 1
+  selector:
+    matchLabels: {app: ledger-db}
+  template:
+    metadata:
+      labels:
+        app: ledger-db
+        team: payments
+        cost-center: cc-banking
+        environment: prod
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16.4-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/scripts/entry.sh"]
+          ports: [{containerPort: 5432, name: postgres}]
+          env:
+            - {name: POSTGRES_DB, value: ledger}
+            - {name: LEDGER_ROLE, value: primary}
+            - {name: LEDGER_SOURCE_HOST, value: ""}
+            - {name: LEDGER_SOURCE_PORT, value: "30432"}
+            - {name: LEDGER_RESYNC_GENERATION, value: "0"}
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: ledger-db-credentials, key: POSTGRES_PASSWORD}}
+            - name: REPLICATION_PASSWORD
+              valueFrom: {secretKeyRef: {name: ledger-db-credentials, key: REPLICATION_PASSWORD}}
+            - name: APP_PASSWORD
+              valueFrom: {secretKeyRef: {name: ledger-db-credentials, key: APP_PASSWORD}}
+          readinessProbe:
+            exec: {command: ["pg_isready", "-U", "postgres", "-d", "ledger"]}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 256Mi}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql/data}
+            - {name: scripts, mountPath: /scripts}
+            - {name: scripts, mountPath: /docker-entrypoint-initdb.d/init-ledger.sh, subPath: init-ledger.sh}
+      volumes:
+        - name: scripts
+          configMap: {name: ledger-db-scripts}
+  volumeClaimTemplates:
+    # API-server defaults written explicitly so that Git == live (Argo CD diff).
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        volumeMode: Filesystem
+        resources: {requests: {storage: 1Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ledger-db
+  namespace: banking
+spec:
+  selector: {app: ledger-db}
+  ports: [{port: 5432, targetPort: postgres, name: postgres}]
+---
+# Cross-cluster endpoint: replication stream + control connections of the FinOps
+# service (promotion, fencing, lag). NodePort on the kind network only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ledger-db-external
+  namespace: banking
+spec:
+  type: NodePort
+  selector: {app: ledger-db}
+  ports: [{port: 5432, targetPort: postgres, nodePort: 30432, name: postgres}]

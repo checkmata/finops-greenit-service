@@ -1,118 +1,98 @@
 """
-load_test_data.py — Seed the local TimescaleDB with realistic test data.
+load_test_data.py — seed a database with SYNTHETIC history (demo / dashboards).
 
-WHY this script exists:
-- Manual testing via Grafana dashboards needs data in TimescaleDB
-- Running the API endpoints against an empty DB is useless for demo/debug
-- Seeds both recommendations and metric_snapshots tables with realistic patterns
+V1 fixes: the MVP script used Severity.HIGH (does not exist), numeric
+current_value (column is TEXT), a hard-coded URL that did not match
+docker-compose, and inserted duplicate recommendations.
 
-HOW to use:
-    docker compose up -d timescaledb   # start the DB
-    python scripts/load_test_data.py   # seed it
+    python -m scripts.load_test_data                   # uses DATABASE_URL (.env)
+    python -m scripts.load_test_data --database-url sqlite+aiosqlite:///.demo/seed.db
 
-No external dependencies beyond what's already in requirements.txt.
+Every value is synthetic and random — never present it as measured data.
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import math
 import random
 from datetime import datetime, timedelta, timezone
 
 from app.adapters.outbound.timescale_adapter import TimescaleAdapter
+from app.config import settings
 from app.domain.models.recommendation import Category, Recommendation, Severity
 from app.ports.storage_port import MetricSnapshot
+from app.domain.models.snapshot import WorkloadSnapshot
+
+SCOPES = [
+    ("primary", "banking", "payments", "cc-banking", ["txn-processor", "fraud-scorer"]),
+    ("primary", "trading", "markets", "cc-trading", ["order-matcher", "market-feed"]),
+    ("primary", "ecommerce", "digital", "cc-ecommerce", ["frontend", "cartservice"]),
+    ("secondary", "ecommerce", "digital", "cc-ecommerce", ["frontend"]),
+]
 
 
-async def seed_recommendations(adapter: TimescaleAdapter) -> int:
-    """Generate and persist realistic recommendations. Returns count."""
-    namespaces = [
-        ("team-alpha", "platform", "engineering", "prod"),
-        ("team-beta", "data", "analytics", "prod"),
-        ("team-gamma", "backend", "infra", "staging"),
-    ]
-
-    templates = [
-        (Category.COST_RIGHTSIZING, Severity.HIGH, "cpu",
-         "CPU requests over-provisioned by {pct}%", 8.0, 4.0, 87.60, 12.5),
-        (Category.COST_RIGHTSIZING, Severity.WARNING, "memory",
-         "Memory requests over-provisioned by {pct}%", 16.0, 8.0, 45.20, 6.8),
-        (Category.COST_IDLE_RESOURCE, Severity.WARNING, "cpu",
-         "CPU utilization below 10% for 7+ days", 0.5, 0.0, 35.40, 5.1),
-        (Category.ENERGY_WASTE, Severity.INFO, "energy",
-         "Idle workload consuming {kwh} kWh/day unnecessarily", 0.0, 0.0, 0.0, 8.2),
-        (Category.CARBON_INTENSITY, Severity.INFO, "carbon",
-         "Carbon footprint: {kg} kg CO2e/month (INFO — informational only)",
-         0.0, 0.0, 0.0, 3.5),
-        (Category.DATA_QUALITY, Severity.WARNING, "data_quality",
-         "Kepler data unavailable — energy/carbon estimates based on model only",
-         0.0, 0.0, 0.0, 0.0),
-    ]
-
-    count = 0
-    for ns, team, cost_center, env in namespaces:
-        for cat, sev, resource, msg_tpl, cur, rec, usd, co2 in templates:
-            pct = random.randint(30, 70)
-            kwh = random.uniform(5.0, 25.0)
-            kg = random.uniform(1.0, 10.0)
-            msg = msg_tpl.format(pct=pct, kwh=f"{kwh:.1f}", kg=f"{kg:.1f}")
-            rec_obj = Recommendation(
-                namespace=ns, category=cat, severity=sev, resource=resource,
-                message=msg, current_value=cur, recommended_value=rec,
-                estimated_savings_usd=usd, estimated_savings_kg_co2=co2,
-            )
-            await adapter.save_recommendation(rec_obj)
-            count += 1
-
-    return count
-
-
-async def seed_snapshots(adapter: TimescaleAdapter) -> int:
-    """Generate and persist 7 days of hourly metric snapshots. Returns count."""
+async def seed(adapter: TimescaleAdapter, days: int, rng: random.Random) -> tuple[int, int]:
     now = datetime.now(timezone.utc)
-    namespaces = [
-        ("team-alpha", "platform", "engineering", "prod"),
-        ("team-beta", "data", "analytics", "prod"),
-    ]
+    snaps = 0
+    for hours_ago in range(days * 24, 0, -1):
+        t = now - timedelta(hours=hours_ago)
+        diurnal = 1 + 0.3 * math.sin(2 * math.pi * t.hour / 24)
+        for cluster, ns, team, cc, workloads in SCOPES:
+            factor = 0.15 if cluster == "secondary" else 1.0
+            requested = 60.0 * factor
+            used = requested * rng.uniform(0.25, 0.45) * diurnal
+            waste = requested - used
+            energy = 3.0 * factor * diurnal
+            await adapter.save_snapshot(MetricSnapshot(
+                time=t, cluster=cluster, namespace=ns, team=team, cost_center=cc, environment="prod",
+                cpu_core_hours=used / 21.6, memory_gb_hours=4.0 * factor, cost_usd=round(used, 2),
+                requested_cost_usd=requested, waste_cost_usd=round(waste, 2),
+                waste_pct=round(100 * waste / requested, 1), potential_savings_usd=round(waste * 0.6, 2),
+                storage_cost_usd=0.5 if ns == "banking" else None,
+                storage_status="available" if ns == "banking" else "not_applicable",
+                energy_kwh=round(energy, 3), co2e_kg=round(energy * 1.4 * 0.475, 3),
+                idle_energy_kwh=round(energy * 0.35, 3) if cluster == "primary" else None,
+                energy_attribution="container" if cluster == "primary" else "node_cpu_share",
+            ))
+            await adapter.save_workload_snapshots([
+                WorkloadSnapshot(t, cluster, ns, w, team, cc, "prod", 0.3 * factor, 1.0 * factor, 0.3, 1.0,
+                                 21.6 * factor, round(used / len(workloads), 2),
+                                 round(waste / len(workloads), 2), round(waste * 0.6 / len(workloads), 2))
+                for w in workloads
+            ])
+            snaps += 1
 
-    count = 0
-    for ns, team, cc, env in namespaces:
-        for hours_ago in range(168, 0, -1):  # 7 days * 24 hours
-            ts = now - timedelta(hours=hours_ago)
-            snap = MetricSnapshot(
-                time=ts,
-                namespace=ns,
-                team=team,
-                cost_center=cc,
-                environment=env,
-                cpu_core_hours=random.uniform(2.0, 8.0),
-                memory_gb_hours=random.uniform(4.0, 16.0),
-                cost_usd=random.uniform(20.0, 120.0),
-                energy_kwh=random.uniform(10.0, 50.0),
-                co2e_kg=random.uniform(2.0, 12.0),
-                waste_pct=random.uniform(5.0, 40.0),
+    recs = 0
+    for cluster, ns, team, cc, workloads in SCOPES:
+        for w in workloads:
+            rec = Recommendation(
+                category=Category.COST_RIGHTSIZING, severity=rng.choice([Severity.WARNING, Severity.CRITICAL]),
+                namespace=ns, resource="cpu", message=f"[SYNTHETIC] Workload '{w}': CPU ~30% utilized.",
+                current_value="1.0", recommended_value="0.4", estimated_savings_usd=round(rng.uniform(5, 40), 2),
+                cluster=cluster, workload=w, team=team, cost_center=cc, environment="prod",
             )
-            await adapter.save_snapshot(snap)
-            count += 1
-
-    return count
+            _, action = await adapter.upsert_recommendation(rec)  # idempotent: re-running does not duplicate
+            recs += action == "insert"
+    return snaps, recs
 
 
 async def main() -> None:
-    """Connect to local TimescaleDB and seed test data."""
-    adapter = TimescaleAdapter("postgresql://finops:finops@localhost:5432/finops")
-    await adapter.ensure_tables_exist()
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--database-url", default=settings.DATABASE_URL)
+    parser.add_argument("--days", type=int, default=7)
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
 
-    print("Seeding recommendations...")
-    rec_count = await seed_recommendations(adapter)
-    print(f"  Created {rec_count} recommendations")
-
-    print("Seeding metric snapshots (7 days, hourly)...")
-    snap_count = await seed_snapshots(adapter)
-    print(f"  Created {snap_count} snapshots across 2 namespaces")
-
-    await adapter.close()
-    print("Done. Query via Grafana or the API: http://localhost:8000/docs")
+    adapter = TimescaleAdapter(args.database_url)
+    try:
+        if args.database_url.startswith("sqlite"):
+            await adapter.ensure_tables_exist()  # PostgreSQL: tables come from the SQL migrations
+        snaps, recs = await seed(adapter, args.days, random.Random(args.seed))
+        print(f"Seeded {snaps} namespace snapshots (+ workload rows) and {recs} new recommendations.")
+    finally:
+        await adapter.close()
 
 
 if __name__ == "__main__":

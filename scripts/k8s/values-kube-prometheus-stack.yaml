@@ -1,0 +1,32 @@
+# kube-prometheus-stack values — one install PER cluster (real clusters, V2).
+# Grafana/Alertmanager are central, not per cluster.
+grafana:
+  enabled: false
+alertmanager:
+  enabled: false
+prometheus:
+  service:
+    type: NodePort
+    nodePort: 30090          # the central FinOps service scrapes nothing; it QUERIES this API
+  prometheusSpec:
+    retention: 3d
+    scrapeInterval: 15s
+    resources:
+      requests: {cpu: 100m, memory: 400Mi}
+      limits: {memory: 900Mi}
+    # Pick up ServiceMonitors/PodMonitors from every namespace/release (Kepler, workloads)
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+prometheusOperator:
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+kube-state-metrics:
+  # kube_pod_labels only exposes allow-listed labels (KSM v2). The service needs:
+  #   app → workload ; team / cost-center / environment → attribution
+  metricLabelsAllowlist:
+    - pods=[app,team,cost-center,environment]
+# minikube: control-plane components are not reachable for scraping → avoid down targets
+kubeEtcd: {enabled: false}
+kubeControllerManager: {enabled: false}
+kubeScheduler: {enabled: false}
+kubeProxy: {enabled: false}

@@ -1,0 +1,43 @@
+# The two REAL kind clusters (scripts/k8s/kind-up.sh), as seen from the api
+# container on the Docker "kind" network. Credentials are Docker secrets
+# (/run/secrets/*, files in the git-ignored .secrets/), never inline.
+clusters:
+  - name: primary
+    role: primary
+    prometheus_url: http://primary-control-plane:30090
+    # V2.x: replicated banking ledger (workloads/banking/k8s/base/ledger-db.yaml).
+    # Superuser password = Docker secret (scripts/dr/make-ledger-secrets.sh).
+    data_services:
+      - name: banking-ledger
+        kind: postgres
+        host: primary-control-plane
+        port: 30432
+        database: ledger
+        username: postgres
+        password_file: /run/secrets/ledger_postgres_password
+        app_role: ledger_app
+  - name: secondary
+    role: secondary
+    # V2: queried through a basic-auth proxy (manifests/prometheus-auth-proxy.yaml)
+    prometheus_url: http://secondary-control-plane:30091
+    prometheus_auth:
+      type: basic
+      username: finops
+      password_file: /run/secrets/prom_secondary_password
+    # Failover actuation (V2): least-privilege ServiceAccount token
+    # (manifests/failover-actuator-rbac.yaml, scripts/k8s/make-actuator-secrets.sh)
+    kubernetes:
+      api_url: https://secondary-control-plane:6443
+      token_file: /run/secrets/k8s_secondary_token
+      ca_file: /run/secrets/k8s_secondary_ca
+    # V2.x: replicated banking ledger (workloads/banking/k8s/base/ledger-db.yaml).
+    # Superuser password = Docker secret (scripts/dr/make-ledger-secrets.sh).
+    data_services:
+      - name: banking-ledger
+        kind: postgres
+        host: secondary-control-plane
+        port: 30432
+        database: ledger
+        username: postgres
+        password_file: /run/secrets/ledger_postgres_password
+        app_role: ledger_app

@@ -14,3 +14,10 @@ mypy==1.11.1
 
 # Type stubs
 types-requests==2.31.0.0
+# SQLite async driver — used by the storage adapter tests (was missing: 22 tests
+# failed with ModuleNotFoundError in the MVP) and by scripts/run_local_demo.sh.
+aiosqlite==0.22.1
+
+# V3 evaluation only (scripts/ml/evaluate.py): Isolation Forest comparison. Not a runtime dependency.
+numpy==2.1.2
+scikit-learn==1.5.2

@@ -1,90 +1,105 @@
-# finops-greenit-service — local development stack
-# Usage: docker compose up -d
-# The same TimescaleDB image (timescale/timescaledb:latest-pg16) will later
-# be deployed to OpenShift as a StatefulSet — no polyglot persistence.
+# =============================================================================
+# finops-greenit-service — management plane (V2)
 #
-# Services:
-#   timescaledb    — PostgreSQL + TimescaleDB extension (storage backend)
-#   fake-exporter  — Python app exposing P0 metrics (simulates cAdvisor + Kepler)
-#   prometheus     — scrapes fake-exporter, provides PromQL endpoint
-#   grafana        — dashboards with Prometheus + TimescaleDB datasources pre-provisioned
+#   cp .env.example .env     # passwords + Prometheus URLs of the REAL clusters
+#   docker compose up -d --build
+#
+# Default services = the management plane that observes REAL Kubernetes
+# clusters (each runs its own Prometheus, see scripts/k8s/):
+#   timescaledb · api · grafana
+# The V1 laptop simulation (simulated clusters + their Prometheus) is kept but
+# only started on demand:  docker compose --profile simulation up -d
+# =============================================================================
+
+x-sim: &sim
+  build: ./exporter
+  restart: unless-stopped
+  profiles: [simulation]
+  environment: &simenv
+    SIM_DAY_SECONDS: "3600"
 
 services:
-  # --- TimescaleDB (PostgreSQL + time-series extension) ---
   timescaledb:
-    image: timescale/timescaledb:latest-pg16
-    container_name: finops-timescaledb
+    image: timescale/timescaledb:2.17.2-pg16
     restart: unless-stopped
-    ports:
-      - "5432:5432"
+    ports: ["5432:5432"]
     environment:
       POSTGRES_DB: finops_greenit
       POSTGRES_USER: finops
-      POSTGRES_PASSWORD: finops_dev_password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see .env.example)}
+      # The image runs timescaledb-tune at init and sizes shared_buffers on the
+      # WHOLE machine RAM (observed: ~1 GiB on a 3 GiB node → node thrashing).
+      TS_TUNE_MEMORY: ${TS_TUNE_MEMORY:-384MB}
+      TS_TUNE_MAX_CONNS: "60"
+    mem_limit: 512m
     volumes:
       - timescaledb_data:/var/lib/postgresql/data
-      # Run migrations on first start (idempotent — safe to re-run)
+      # 001_init.sql, 002_v1_multicluster.sql, 003_v2_*.sql … run in order on first start
       - ./app/adapters/outbound/db/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U finops -d finops_greenit"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 20
 
-  # --- Fake metrics exporter (simulates cAdvisor + Kepler P0 metrics) ---
-  # WHY a separate container:
-  # - Prometheus scrapes it like a real cAdvisor/Kepler endpoint
-  # - Tests the full pipeline: exporter → Prometheus → our adapter → domain → API
-  # - Edge cases (empty namespaces, degraded sources) tested by changing this exporter
-  fake-exporter:
-    build: ./exporter
-    container_name: finops-fake-exporter
+  api:
+    build: .
     restart: unless-stopped
-    ports:
-      - "8000:8000"
-
-  # --- Prometheus (scrapes fake-exporter, provides PromQL) ---
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: finops-prometheus
-    restart: unless-stopped
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.retention.time=7d"
+    mem_limit: 256m
+    # Fixed host port (a port RANGE made compose pick 8081 on recreate — observed).
+    ports: ["8080:8080"]
+    environment:
+      CLUSTERS_CONFIG_FILE: ${CLUSTERS_CONFIG_FILE:-/app/config/clusters.real.yaml}
+      PROMETHEUS_PRIMARY_URL: ${PROMETHEUS_PRIMARY_URL:-}
+      PROMETHEUS_SECONDARY_URL: ${PROMETHEUS_SECONDARY_URL:-}
+      DATABASE_URL: postgresql://finops:${POSTGRES_PASSWORD}@timescaledb:5432/finops_greenit
+      SCHEDULER_INTERVAL_SECONDS: ${SCHEDULER_INTERVAL_SECONDS:-60}
+      MIN_OBSERVATION_HOURS: ${MIN_OBSERVATION_HOURS:-24}
+      LOG_FORMAT: text
     depends_on:
-      fake-exporter:
-        condition: service_started
+      timescaledb: {condition: service_healthy}
 
-  # --- Grafana (dashboards with pre-provisioned datasources) ---
   grafana:
-    image: grafana/grafana:latest
-    container_name: finops-grafana
+    image: grafana/grafana:11.1.0
     restart: unless-stopped
-    ports:
-      - "3000:3000"
+    mem_limit: 256m
+    ports: ["3000:3000"]
     environment:
       GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in .env}
       GF_USERS_ALLOW_SIGN_UP: "false"
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TIMESCALEDB_HOST: timescaledb
+      PROMETHEUS_PRIMARY_URL: ${PROMETHEUS_PRIMARY_URL:-http://prometheus-primary:9090}
+      PROMETHEUS_SECONDARY_URL: ${PROMETHEUS_SECONDARY_URL:-http://prometheus-secondary:9090}
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
       - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
-      prometheus:
-        condition: service_started
-      timescaledb:
-        condition: service_healthy
+      timescaledb: {condition: service_healthy}
+
+  # --- V1 laptop SIMULATION (profile "simulation" only) ----------------------
+  sim-primary:
+    <<: *sim
+    environment: {<<: *simenv, CLUSTER_NAME: primary, CLUSTER_PROFILE: primary}
+    ports: ["8001:8000"]
+  prometheus-primary:
+    image: prom/prometheus:v2.53.2
+    profiles: [simulation]
+    ports: ["9090:9090"]
+    volumes: ["./prometheus/prometheus-primary.yml:/etc/prometheus/prometheus.yml:ro"]
+  sim-secondary:
+    <<: *sim
+    environment: {<<: *simenv, CLUSTER_NAME: secondary, CLUSTER_PROFILE: secondary}
+    ports: ["8002:8000"]
+  prometheus-secondary:
+    image: prom/prometheus:v2.53.2
+    profiles: [simulation]
+    ports: ["9091:9090"]
+    volumes: ["./prometheus/prometheus-secondary.yml:/etc/prometheus/prometheus.yml:ro"]
 
 volumes:
   timescaledb_data:
-    driver: local
-  prometheus_data:
-    driver: local
   grafana_data:
-    driver: local

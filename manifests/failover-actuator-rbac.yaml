@@ -1,0 +1,60 @@
+# Least-privilege identity for the FinOps failover actuator (V2).
+# Apply on the STANDBY cluster(s). It can only read Deployments and change their
+# replica count, only in the listed namespaces — no create/delete, no Secrets,
+# nothing cluster-wide.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: finops-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: finops-failover-actuator
+  namespace: finops-system
+---
+# V2.x: namespaced Roles (was one ClusterRole) so that GitOps can manage them
+# without any cluster-scoped RBAC right. Same rules, same namespaces. New name
+# because a RoleBinding roleRef is immutable; the V2 objects (ClusterRole +
+# RoleBindings "finops-failover-scaler") are removed by scripts/gitops/register-clusters.sh.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: finops-failover-actuator, namespace: banking}
+rules:
+  - {apiGroups: ["apps"], resources: ["deployments"], verbs: ["get", "list"]}
+  - {apiGroups: ["apps"], resources: ["deployments/scale"], verbs: ["get", "patch", "update"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: finops-failover-actuator, namespace: ecommerce}
+rules:
+  - {apiGroups: ["apps"], resources: ["deployments"], verbs: ["get", "list"]}
+  - {apiGroups: ["apps"], resources: ["deployments/scale"], verbs: ["get", "patch", "update"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: finops-failover-actuator, namespace: trading}
+rules:
+  - {apiGroups: ["apps"], resources: ["deployments"], verbs: ["get", "list"]}
+  - {apiGroups: ["apps"], resources: ["deployments/scale"], verbs: ["get", "patch", "update"]}
+---
+---
+# One RoleBinding per namespace the actuator may touch (FAILOVER_NAMESPACES).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: finops-failover-actuator, namespace: banking}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: finops-failover-actuator}
+subjects: [{kind: ServiceAccount, name: finops-failover-actuator, namespace: finops-system}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: finops-failover-actuator, namespace: ecommerce}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: finops-failover-actuator}
+subjects: [{kind: ServiceAccount, name: finops-failover-actuator, namespace: finops-system}]
+---
+# V2.x: trading is now replicated to the standby by GitOps (0 replicas, promoted on failover).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: finops-failover-actuator, namespace: trading}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: finops-failover-actuator}
+subjects: [{kind: ServiceAccount, name: finops-failover-actuator, namespace: finops-system}]

@@ -217,8 +217,9 @@ spec:
 
           # Liveness probe — restart the pod if the app is unresponsive
           livenessProbe:
+            # V1: liveness must not depend on Prometheus/DB (a restart fixes neither).
             httpGet:
-              path: /health
+              path: /health/live
               port: http
             # WHY /health (not /docs or /openapi.json):
             #   - /health checks BOTH Prometheus and Database connectivity
@@ -247,7 +248,7 @@ spec:
           # Startup probe — give the app time to start (slow startup protection)
           startupProbe:
             httpGet:
-              path: /health
+              path: /health/live
               port: http
             initialDelaySeconds: 5
             periodSeconds: 5

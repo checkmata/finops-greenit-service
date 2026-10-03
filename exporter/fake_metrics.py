@@ -1,248 +1,120 @@
 """
-Fake Prometheus exporter for local dev — exposes P0 metrics from docs/metrics-reference.md.
+Entry point of one SIMULATED cluster (local demo).
 
-WHY a fake exporter (not injecting data into Prometheus's storage):
-- Prometheus's remote-write API is for ingestion, not mocking.
-- Pushing fake data tests Prometheus's storage layer, not our PromQL→domain→API pipeline.
-- A fake exporter means Prometheus receives metrics exactly as real cAdvisor/Kepler would.
-- Our adapter queries it identically to production — same PromQL, same JSON response.
-- Edge cases (empty namespaces, degraded sources) are tested by changing the exporter.
+    CLUSTER_NAME=primary   CLUSTER_PROFILE=primary   python -m exporter.fake_metrics
 
-WHAT this exposes:
-- container_cpu_usage_seconds_total — FinOps P0
-- container_memory_working_set_bytes — FinOps P0
-- kube_pod_container_resource_requests — FinOps P0
-- kube_node_status_allocatable — FinOps P0
-- kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes — FinOps P0
-- kube_persistentvolumeclaim_info — FinOps P0
-- kepler_node_cpu_joules_total — Green IT P0
-- kepler_container_cpu_joules_total — Green IT P0
-- up{job="kube-state-metrics|node-exporter|kepler"} — data quality guard
+Ports (override with *_PORT env vars):
+    8000  admin API (JSON)       GET /state · POST /components/<c>/<up|down>
+                                 POST /cluster/<up|down>
+                                 POST /workloads/<ns>/<name>/<up|down>
+                                 POST /workloads/<ns>/<name>/replicas/<n>
+                                 POST /workloads/<ns>/<name>/load/<factor>
+    9101  kube-state-metrics /metrics
+    9102  node-exporter      /metrics
+    9103  kepler             /metrics
+    9104  kubelet (cAdvisor) /metrics
 
-Simulated namespaces: team-alpha, team-beta.
+A component that is "down" answers 503, so Prometheus records up{job=...}=0 —
+exactly what the service's DataQuality check reads on a real cluster.
 """
 
-from prometheus_client import Counter, Gauge, start_http_server
+from __future__ import annotations
 
-# =============================================================================
-# FinOps P0 metrics
-# =============================================================================
+import json
+import os
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# container_cpu_usage_seconds_total — rate over 30d → cpu_core_hours
-# Simulates cAdvisor per-container CPU usage (monotonically increasing counter).
-CONTAINER_CPU_USAGE = Counter(
-    "container_cpu_usage_seconds_total",
-    "Cumulative CPU usage in seconds",
-    ["namespace", "pod", "container"],
-)
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
-# container_memory_working_set_bytes — instant → memory_bytes
-CONTAINER_MEMORY_WORKING_SET = Gauge(
-    "container_memory_working_set_bytes",
-    "Current working set memory in bytes",
-    ["namespace", "pod", "container"],
-)
+from exporter.profiles import PROFILES
+from exporter.simulator import ClusterSimulator
 
-# kube_pod_container_resource_requests — CPU and memory requests
-KUBE_POD_CONTAINER_RESOURCE_REQUESTS = Gauge(
-    "kube_pod_container_resource_requests",
-    "Resource requests (CPU in cores, memory in bytes)",
-    ["namespace", "pod", "container", "resource"],
-)
-
-# kube_node_status_allocatable — cluster-wide allocatable CPU and memory
-KUBE_NODE_STATUS_ALLOCATABLE = Gauge(
-    "kube_node_status_allocatable",
-    "Allocatable resources on a node",
-    ["node", "resource"],
-)
-
-# kubelet_volume_stats — PVC storage metrics
-KUBELET_VOLUME_STATS_USED = Gauge(
-    "kubelet_volume_stats_used_bytes",
-    "Used bytes on a PVC",
-    ["namespace", "persistentvolumeclaim"],
-)
-
-KUBELET_VOLUME_STATS_CAPACITY = Gauge(
-    "kubelet_volume_stats_capacity_bytes",
-    "Capacity bytes on a PVC",
-    ["namespace", "persistentvolumeclaim"],
-)
-
-# kube_persistentvolumeclaim_info — PVC phase
-KUBE_PVCLAIM_INFO = Gauge(
-    "kube_persistentvolumeclaim_info",
-    "PVC metadata",
-    ["namespace", "persistentvolumeclaim", "phase"],
-)
-
-# =============================================================================
-# Green IT P0 metrics
-# =============================================================================
-
-# kepler_node_cpu_joules_total — node-level energy (monotonically increasing counter)
-KEPLER_NODE_CPU_JOULES = Counter(
-    "kepler_node_cpu_joules_total",
-    "Cumulative CPU energy consumption in joules",
-    ["instance", "mode"],
-)
-
-# kepler_container_cpu_joules_total — per-container energy
-KEPLER_CONTAINER_CPU_JOULES = Counter(
-    "kepler_container_cpu_joules_total",
-    "Cumulative container CPU energy consumption in joules",
-    ["namespace", "pod", "container"],
-)
-
-# =============================================================================
-# Data quality guard
-# =============================================================================
-
-# up{job="..."} — 1 = healthy, 0 = down
-UP = Gauge(
-    "up",
-    "Target liveness (1=alive, 0=down)",
-    ["job"],
-)
-
-# =============================================================================
-# Pod attribution labels
-# =============================================================================
-
-KUBE_POD_LABELS = Gauge(
-    "kube_pod_labels",
-    "Kubernetes labels for a pod",
-    ["namespace", "pod", "label_team", "label_cost_center", "label_environment"],
-)
+PORTS = {
+    "kube-state-metrics": int(os.getenv("KSM_PORT", "9101")),
+    "node-exporter": int(os.getenv("NODE_EXPORTER_PORT", "9102")),
+    "kepler": int(os.getenv("KEPLER_PORT", "9103")),
+    "kubelet": int(os.getenv("KUBELET_PORT", "9104")),
+}
+ADMIN_PORT = int(os.getenv("ADMIN_PORT", "8000"))
 
 
-def populate_metrics() -> None:
-    """Set initial metric values for team-alpha and team-beta.
+def metrics_handler(sim: ClusterSimulator, component: str):
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            if not sim.serving(component):
+                self.send_response(503)
+                self.end_headers()
+                self.wfile.write(b"component down (simulated)\n")
+                return
+            with sim.lock:
+                body = generate_latest(sim.registries[component])
+            self.send_response(200)
+            self.send_header("Content-Type", CONTENT_TYPE_LATEST)
+            self.end_headers()
+            self.wfile.write(body)
 
-    WHY specific values:
-    - team-alpha: over-provisioned (CPU usage ~30% of requested) → triggers COST_RIGHTSIZING
-    - team-beta: well-utilized (CPU usage ~70% of requested) → no recommendation
-    - Both have Kepler energy data → triggers Green IT carbon footprint
-    """
+        def log_message(self, *args):
+            pass
+    return H
 
-    # --- team-alpha: over-provisioned namespace ---
-    # 2 pods, each with 2 containers (web + sidecar)
-    for pod_idx in range(2):
-        pod_name = f"alpha-web-{pod_idx}"
-        for container in ["web", "sidecar"]:
-            # CPU: 1200 seconds / 30 days = 0.00139 core-hours (low usage)
-            CONTAINER_CPU_USAGE.labels(
-                namespace="team-alpha", pod=pod_name, container=container
-            ).inc(1200)
 
-            # Memory: 256 MiB working set
-            CONTAINER_MEMORY_WORKING_SET.labels(
-                namespace="team-alpha", pod=pod_name, container=container
-            ).set(256 * 1024 * 1024)
+def admin_handler(sim: ClusterSimulator):
+    class H(BaseHTTPRequestHandler):
+        def _json(self, code: int, obj) -> None:
+            data = json.dumps(obj).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(data)
 
-            # Requested: 2.0 cores CPU, 1 GiB memory (over-provisioned)
-            KUBE_POD_CONTAINER_RESOURCE_REQUESTS.labels(
-                namespace="team-alpha", pod=pod_name, container=container, resource="cpu"
-            ).set(2.0)
-            KUBE_POD_CONTAINER_RESOURCE_REQUESTS.labels(
-                namespace="team-alpha", pod=pod_name, container=container, resource="memory"
-            ).set(1024 * 1024 * 1024)
+        def do_GET(self):  # noqa: N802
+            self._json(200, sim.state()) if self.path.rstrip("/") in ("", "/state") else self._json(404, {})
 
-            # Kepler per-container energy: ~500 joules over 24h
-            KEPLER_CONTAINER_CPU_JOULES.labels(
-                namespace="team-alpha", pod=pod_name, container=container
-            ).inc(500)
+        def do_POST(self):  # noqa: N802
+            parts = [p for p in self.path.split("/") if p]
+            try:
+                if parts[:1] == ["cluster"] and len(parts) == 2:
+                    sim.cluster_up = parts[1] == "up"
+                elif parts[:1] == ["components"] and len(parts) == 3:
+                    sim.set_component(parts[1], parts[2] == "up")
+                elif parts[:1] == ["workloads"] and len(parts) == 4:
+                    sim.set_workload(parts[1], parts[2], up=parts[3] == "up")
+                elif parts[:1] == ["workloads"] and len(parts) == 5 and parts[3] == "replicas":
+                    sim.set_workload(parts[1], parts[2], replicas=int(parts[4]))
+                elif parts[:1] == ["workloads"] and len(parts) == 5 and parts[3] == "load":
+                    sim.set_workload(parts[1], parts[2], load=float(parts[4]))
+                else:
+                    return self._json(404, {"error": "unknown admin path"})
+            except (KeyError, ValueError) as exc:
+                return self._json(400, {"error": str(exc)})
+            self._json(200, sim.state())
 
-        # Pod attribution labels
-        KUBE_POD_LABELS.labels(
-            namespace="team-alpha",
-            pod=pod_name,
-            label_team="team-alpha",
-            label_cost_center="cc-001",
-            label_environment="production",
-        ).set(1)
+        def log_message(self, *args):
+            pass
+    return H
 
-    # --- team-beta: well-utilized namespace ---
-    for pod_idx in range(3):
-        pod_name = f"beta-api-{pod_idx}"
-        for container in ["api", "cache"]:
-            # CPU: 5000 seconds / 30 days = 0.00694 core-hours (higher usage)
-            CONTAINER_CPU_USAGE.labels(
-                namespace="team-beta", pod=pod_name, container=container
-            ).inc(5000)
 
-            # Memory: 512 MiB working set
-            CONTAINER_MEMORY_WORKING_SET.labels(
-                namespace="team-beta", pod=pod_name, container=container
-            ).set(512 * 1024 * 1024)
+def serve(port: int, handler) -> None:
+    server = ThreadingHTTPServer(("0.0.0.0", port), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
 
-            # Requested: 1.0 cores CPU, 768 MiB memory (well-utilized)
-            KUBE_POD_CONTAINER_RESOURCE_REQUESTS.labels(
-                namespace="team-beta", pod=pod_name, container=container, resource="cpu"
-            ).set(1.0)
-            KUBE_POD_CONTAINER_RESOURCE_REQUESTS.labels(
-                namespace="team-beta", pod=pod_name, container=container, resource="memory"
-            ).set(768 * 1024 * 1024)
 
-            # Kepler per-container energy: ~1200 joules over 24h
-            KEPLER_CONTAINER_CPU_JOULES.labels(
-                namespace="team-beta", pod=pod_name, container=container
-            ).inc(1200)
-
-        # Pod attribution labels
-        KUBE_POD_LABELS.labels(
-            namespace="team-beta",
-            pod=pod_name,
-            label_team="team-beta",
-            label_cost_center="cc-002",
-            label_environment="production",
-        ).set(1)
-
-    # --- Cluster-wide allocatable ---
-    KUBE_NODE_STATUS_ALLOCATABLE.labels(node="node-1", resource="cpu").set(16.0)
-    KUBE_NODE_STATUS_ALLOCATABLE.labels(node="node-1", resource="memory").set(64 * 1024**3)
-    KUBE_NODE_STATUS_ALLOCATABLE.labels(node="node-2", resource="cpu").set(16.0)
-    KUBE_NODE_STATUS_ALLOCATABLE.labels(node="node-2", resource="memory").set(64 * 1024**3)
-
-    # --- PVC metrics (team-alpha has a large unused PVC) ---
-    KUBELET_VOLUME_STATS_USED.labels(
-        namespace="team-alpha", persistentvolumeclaim="data-alpha-0"
-    ).set(2 * 1024**3)  # 2 GiB used
-    KUBELET_VOLUME_STATS_CAPACITY.labels(
-        namespace="team-alpha", persistentvolumeclaim="data-alpha-0"
-    ).set(50 * 1024**3)  # 50 GiB capacity (4% used → mostly wasted)
-    KUBE_PVCLAIM_INFO.labels(
-        namespace="team-alpha", persistentvolumeclaim="data-alpha-0", phase="Bound"
-    ).set(1)
-
-    KUBELET_VOLUME_STATS_USED.labels(
-        namespace="team-beta", persistentvolumeclaim="data-beta-0"
-    ).set(30 * 1024**3)  # 30 GiB used
-    KUBELET_VOLUME_STATS_CAPACITY.labels(
-        namespace="team-beta", persistentvolumeclaim="data-beta-0"
-    ).set(50 * 1024**3)  # 50 GiB capacity (60% used → reasonable)
-    KUBE_PVCLAIM_INFO.labels(
-        namespace="team-beta", persistentvolumeclaim="data-beta-0", phase="Bound"
-    ).set(1)
-
-    # --- Kepler node-level energy ---
-    KEPLER_NODE_CPU_JOULES.labels(instance="node-1", mode="dynamic").inc(15000)
-    KEPLER_NODE_CPU_JOULES.labels(instance="node-2", mode="dynamic").inc(18000)
-
-    # --- Data quality: all sources healthy ---
-    UP.labels(job="kube-state-metrics").set(1)
-    UP.labels(job="node-exporter").set(1)
-    UP.labels(job="kepler").set(1)
+def main() -> None:
+    name = os.getenv("CLUSTER_NAME", "primary")
+    profile = PROFILES[os.getenv("CLUSTER_PROFILE", name)]
+    sim = ClusterSimulator(name, profile, day_seconds=float(os.getenv("SIM_DAY_SECONDS", "3600")),
+                           seed=int(os.getenv("SIM_SEED", "42")))
+    for comp, port in PORTS.items():
+        serve(port, metrics_handler(sim, comp))
+    serve(ADMIN_PORT, admin_handler(sim))
+    print(f"[{name}] simulated cluster up — admin :{ADMIN_PORT}, components {PORTS}", flush=True)
+    tick = float(os.getenv("SIM_TICK_SECONDS", "1"))
+    while True:
+        sim.tick(tick)
+        time.sleep(tick)
 
 
 if __name__ == "__main__":
-    print("Starting fake metrics exporter on :8000...")
-    populate_metrics()
-    print("Metrics populated. Serving...")
-    start_http_server(8000)
-    # Keep running
-    import time
-
-    while True:
-        time.sleep(60)
+    main()

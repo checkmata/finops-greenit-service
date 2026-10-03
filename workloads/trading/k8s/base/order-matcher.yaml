@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-matcher
+  namespace: trading
+  labels: {app: order-matcher, app.kubernetes.io/part-of: trading}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: order-matcher}
+  template:
+    metadata:
+      labels:
+        app: order-matcher
+        # Attribution labels read by the service through kube_pod_labels
+        # (kube-state-metrics must allow-list them: see scripts/k8s/values-kube-prometheus-stack.yaml)
+        team: markets
+        cost-center: cc-trading
+        environment: prod
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      securityContext: {runAsNonRoot: true}
+      containers:
+        - name: order-matcher
+          image: finops-demo/trading:local
+          imagePullPolicy: IfNotPresent
+          ports: [{containerPort: 8080, name: metrics}]
+          env:
+            - name: ORDERS_PER_SECOND
+              value: "3000"
+          resources:
+            requests: {cpu: "500m", memory: "512Mi"}
+            limits: {memory: "512Mi"}

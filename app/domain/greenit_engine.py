@@ -19,6 +19,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from app.domain.models.carbon_footprint import CarbonFootprint, EnergyBreakdown
+from app.domain.models.energy import EnergyAttribution, EnergyMeasurement, PowerSource
 
 # ---------------------------------------------------------------------------
 # Constants (physics, not configuration)
@@ -148,6 +149,8 @@ def build_carbon_footprint(
     pue: float,
     grid_intensity_gco2_per_kwh: float,
     timestamp: datetime | None = None,
+    energy_attribution: EnergyAttribution = EnergyAttribution.CONTAINER,
+    energy_power_source: PowerSource = PowerSource.UNKNOWN,
 ) -> CarbonFootprint:
     """
     Build a CarbonFootprint domain object from raw Kepler joule readings.
@@ -171,13 +174,48 @@ def build_carbon_footprint(
         energy_kwh=round(energy_kwh, 6),
         co2_kg=round(co2_kg, 6),
         timestamp=timestamp or datetime.now(timezone.utc),
+        energy_attribution=energy_attribution,
+        energy_power_source=energy_power_source,
+    )
+
+
+def carbon_footprint_from_measurement(
+    measurement: EnergyMeasurement,
+    *,
+    team: str,
+    cost_center: str,
+    environment: str,
+    pue: float,
+    grid_intensity_gco2_per_kwh: float,
+    timestamp: datetime | None = None,
+) -> CarbonFootprint | None:
+    """
+    V1 entry point: EnergyMeasurement (with provenance) → CarbonFootprint.
+
+    Returns None when energy is UNAVAILABLE: no CO2 figure is better than a
+    fabricated one. The attribution level is copied onto the footprint so the
+    API and recommendations can say "estimated".
+    """
+    if not measurement.is_available:
+        return None
+    return build_carbon_footprint(
+        namespace=measurement.namespace,
+        team=team,
+        cost_center=cost_center,
+        environment=environment,
+        energy_joules=kwh_to_joules(measurement.total_kwh or 0.0),
+        pue=pue,
+        grid_intensity_gco2_per_kwh=grid_intensity_gco2_per_kwh,
+        timestamp=timestamp,
+        energy_attribution=measurement.attribution,
+        energy_power_source=measurement.power_source,
     )
 
 
 def build_energy_breakdown(
     namespace: str,
     total_energy_kwh: float,
-    idle_energy_kwh: float,
+    idle_energy_kwh: float | None,
     timestamp: datetime | None = None,
 ) -> EnergyBreakdown:
     """
@@ -191,14 +229,14 @@ def build_energy_breakdown(
     idle_energy_kwh comes from:
         node_cpu_seconds_total{mode="idle"} × Kepler power model
 
-    This is a P1 metric (deferred to Phase 2 in metrics-reference.md).
-    For MVP, this function exists and is ready — but the adapter won't
-    query the idle metric until P1 is explicitly requested.
+    V1: idle_energy_kwh is None when the environment cannot measure it
+    (see PrometheusMetricsAdapter.get_energy). None is propagated — the MVP
+    passed a hard-coded 0.0, which read as "no idle waste".
     """
     return EnergyBreakdown(
         namespace=namespace,
         total_energy_kwh=round(total_energy_kwh, 6),
-        idle_waste_kwh=round(idle_energy_kwh, 6),
+        idle_waste_kwh=None if idle_energy_kwh is None else round(idle_energy_kwh, 6),
         timestamp=timestamp or datetime.now(timezone.utc),
     )
 

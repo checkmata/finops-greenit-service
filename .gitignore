@@ -44,3 +44,19 @@ Thumbs.db
 # --- Local scratch / test data you generate while developing ---
 scripts/output/
 *.local.json
+
+# local demo runtime (scripts/run_local_demo.sh)
+.demo/
+
+# V1: real Kubernetes secrets are never committed (use *.example.yaml as template)
+manifests/secret.yaml
+manifests/timescaledb-secret.yaml
+
+# V2: runtime secrets (tokens, CAs) mounted as Docker secrets — never committed
+.secrets/
+
+# V2.x local GitOps working copy (published to the local Gitea only)
+.gitops-work/
+
+# Evidence of the REAL runs (DR, GitOps, agent E2E) is part of the documentation (secret-scanned)
+!docs/evidence/*.log

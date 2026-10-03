@@ -1,0 +1,68 @@
+# Override: management plane on the host Docker, observing the two REAL kind
+# clusters (V2, EXECUTED).
+#
+#   scripts/k8s/make-actuator-secrets.sh secondary        # once (token valid 24 h)
+#   docker compose -f docker-compose.yaml -f docker-compose.kind.yaml up -d --build
+#   docker compose -f docker-compose.yaml -f docker-compose.kind.yaml --profile ha up -d   # 2nd replica
+#
+# api and grafana join the Docker network "kind" where each cluster node is
+# reachable by name (<cluster>-control-plane).
+x-api: &api
+  networks: [default, kind]
+  environment: &apienv
+    CLUSTERS_CONFIG_FILE: /app/config/clusters.kind.yaml
+    PROMETHEUS_PRIMARY_URL: http://primary-control-plane:30090
+    PROMETHEUS_SECONDARY_URL: http://secondary-control-plane:30090
+    FAILOVER_MODE: ${FAILOVER_MODE:-manual}
+    FAILOVER_FAILURE_THRESHOLD_SECONDS: ${FAILOVER_FAILURE_THRESHOLD_SECONDS:-60}
+    FAILOVER_RECOVERY_THRESHOLD_SECONDS: ${FAILOVER_RECOVERY_THRESHOLD_SECONDS:-120}
+    FAILOVER_TICK_SECONDS: ${FAILOVER_TICK_SECONDS:-10}
+    # V4 agent: commits approved actions to the LOCAL GitOps repo with its own identity
+    AGENT_GITOPS_URL: http://gitea:3000
+    AGENT_GITOPS_TOKEN_FILE: /run/secrets/gitea_agent_token
+    AGENT_APPROVAL_TOKEN_FILE: /run/secrets/agent_approval_token
+  secrets: [k8s_secondary_token, k8s_secondary_ca, prom_secondary_password, ledger_postgres_password,
+            gitea_agent_token, agent_approval_token]
+
+services:
+  api:
+    <<: *api
+  # Second replica of the same image (HA / leader election). Same DB, other port.
+  api-2:
+    <<: *api
+    build: .
+    restart: unless-stopped
+    mem_limit: 256m
+    profiles: [ha]
+    ports: ["8082:8080"]
+    environment:
+      <<: *apienv
+      DATABASE_URL: postgresql://finops:${POSTGRES_PASSWORD}@timescaledb:5432/finops_greenit
+      SCHEDULER_INTERVAL_SECONDS: ${SCHEDULER_INTERVAL_SECONDS:-60}
+      MIN_OBSERVATION_HOURS: ${MIN_OBSERVATION_HOURS:-24}
+      LOG_FORMAT: text
+    depends_on:
+      timescaledb: {condition: service_healthy}
+  grafana:
+    networks: [default, kind]
+    environment:
+      PROMETHEUS_PRIMARY_URL: http://primary-control-plane:30090
+      PROMETHEUS_SECONDARY_URL: http://secondary-control-plane:30090
+
+secrets:
+  k8s_secondary_token:
+    file: ./.secrets/k8s_secondary_token
+  k8s_secondary_ca:
+    file: ./.secrets/k8s_secondary_ca.crt
+  prom_secondary_password:
+    file: ./.secrets/prom_secondary_password   # scripts/k8s/make-prometheus-auth.sh secondary
+  ledger_postgres_password:
+    file: ./.secrets/ledger_postgres_password  # scripts/dr/make-ledger-secrets.sh (V2.x)
+  gitea_agent_token:
+    file: ./.secrets/gitea_agent_token         # scripts/gitops/make-agent-identity.sh (V4)
+  agent_approval_token:
+    file: ./.secrets/agent_approval_token      # human approval token (V4), never in Git
+
+networks:
+  kind:
+    external: true

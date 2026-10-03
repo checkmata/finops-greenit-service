@@ -1,0 +1,52 @@
+[20:29:32] == V4 agent E2E — REAL — target primary/banking/txn-processor cpu
+[20:29:32] 1. BEFORE  live request (kubectl) = 400m | last snapshot: 20:29:10 0.8000 requested_cost=18.72
+[20:29:48] 2. AGENT briefing: rank 8/85 score 40.2 — score 40.2: driven by impact (+0.29) and confidence (+0.13), risk -0.12
+[20:29:48]    why: cpu: request 0.8 cores vs usage p95 0.0179 / p99 0.0242, forecast upper 0.0139 over 46.3 h; variability CV 0.45 → margin 38% → recommend 0.03 cores (decrease); confidence 0.66 {'history': 1.0, 'stability': 0.77, 'forecast': 0.86}
+[20:29:48]    metrics: cpu (cores) of primary/banking/txn-processor; p95 0.0179, p99 0.0242, request 0.8
+[20:29:48]    evolution: over 46 h: mean 0.00694 → 0.00903 cores (rising, +30 %)
+[20:29:48]    cost_impact: ≈ $16.63/month of reserved capacity released (workload cost now 0.425 $/month)
+[20:29:48]    energy_impact: none directly: a request is a reservation, the workload keeps consuming what it uses (now 0.0938 W). Indirect gain only if released capacity lets nodes be consolidated — not modelled
+[20:29:48]    co2_impact: none directly (follows energy)
+[20:29:48]    confidence: 0.66 = history 1.0 × stability 0.77 × forecast 0.86
+[20:29:48]    factors: {'impact': 0.975, 'urgency': 0.3, 'confidence': 0.66, 'cost': 0.207, 'energy': 0.168, 'co2': 0.168, 'risk': 0.6}
+[20:29:48] 3. PROPOSE → HTTP 201 status=pending_approval proposal: 0.4 cores → 0.2 cores (staged=True, final target 0.015 cores)
+[20:29:48]    policy: {'step': 'pass (staged: 0.015 cores exceeds ±50%; first step 0.2 cores)', 'action': 'pass', 'bounds': 'pass', 'target': 'pass', 'cluster': 'pass', 'namespace': 'pass', 'confidence': 'pass'}
+[20:29:48]    offline dry-run diff:
+      --- a/workloads/banking/k8s/overlays/primary/agent-patches.yaml
+      +++ b/workloads/banking/k8s/overlays/primary/agent-patches.yaml
+      @@ -0,0 +1,15 @@
+      +# Managed by finops-agent (V4). Every document here comes from an agent action that passed
+      +# the policy and was APPROVED by a human — see agent_actions / agent_audit.
+      +apiVersion: apps/v1
+      +kind: Deployment
+      +metadata:
+      +  name: txn-processor
+      +  namespace: banking
+      +spec:
+      +  template:
+      +    spec:
+      +      containers:
+      +      - name: txn-processor
+      +        resources:
+      +          requests:
+      +            cpu: 200m
+      --- a/workloads/banking/k8s/overlays/primary/kustomization.yaml
+      +++ b/workloads/banking/k8s/overlays/primary/kustomization.yaml
+      @@ -62,3 +62,5 @@
+                         - {name: LEDGER_ROLE, value: primary}
+                         - {name: LEDGER_SOURCE_HOST, value: secondary-control-plane}
+                         - {name: LEDGER_RESYNC_GENERATION, value: "3"}
+      +  # V4 agent actions (approved, audited)
+      +  - path: agent-patches.yaml
+[20:29:48]    idempotence: second proposal → same action id: True (HTTP 201)
+[20:29:48] 4. APPROVE without token → HTTP 403 (invalid approval token)
+[20:29:48]    APPROVE with token → HTTP 202 status=approved
+[20:32:14] 5. EXECUTION → executed in 145s | commit 558a9b452c | cpu request min/max over pods = (0.2, 0.2)
+[20:32:14]    live request (kubectl) = 200m
+[20:32:14]    audit: proposed(e2e-script) → approved(e2e-human) → committed(agent-executor) → verified(agent-executor)
+[20:32:14]    Argo CD banking-primary revision 558a9b452c Synced
+[20:32:34] 6. METRICS CHANGE  TimescaleDB snapshot after the action: 20:32:32 0.4000 requested_cost=10.08
+[20:32:34] 7. NEW OBSERVATION  ML now sees request 0.4 cores (workload total) → decrease to 0.03 (confidence 0.66)
+[20:36:15] 8. ROLLBACK → HTTP 200 status=rolled_back | verified: cpu request min/max over pods = (0.4, 0.4)
+[20:36:15]    live request (kubectl) = 400m
+[20:36:15] RESULT {"action": "f39c3737-7f57-4370-858b-aa6ca3da1e5b", "executed": true, "rolled_back": true}

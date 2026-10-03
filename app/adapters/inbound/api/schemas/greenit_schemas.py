@@ -57,6 +57,13 @@ class CarbonFootprintResponse(BaseModel):
 
     timestamp: datetime = Field(..., description="Data timestamp (UTC)")
 
+    # V1 provenance
+    energy_attribution: str = Field(
+        "container",
+        description="How energy was attributed: container | pod | node_cpu_share | unavailable",
+    )
+    precision: str = Field("measured", description="measured | estimated")
+
 
 # =============================================================================
 # Response schemas — EnergyBreakdown
@@ -79,18 +86,18 @@ class EnergyBreakdownResponse(BaseModel):
         description="Total energy consumption in kWh",
         ge=0.0,
     )
-    idle_waste_kwh: float = Field(
-        ...,
+    idle_waste_kwh: float | None = Field(
+        None,
         description="Energy wasted on idle resources in kWh (P1 metric, may be 0)",
         ge=0.0,
     )
-    active_energy_kwh: float = Field(
-        ...,
+    active_energy_kwh: float | None = Field(
+        None,
         description="Energy consumed by actual workload in kWh",
         ge=0.0,
     )
-    waste_pct: float = Field(
-        ...,
+    waste_pct: float | None = Field(
+        None,
         description="Percentage of energy wasted on idle resources",
         ge=0.0,
         le=100.0,
@@ -121,6 +128,8 @@ def carbon_footprint_to_response(cf: CarbonFootprint) -> CarbonFootprintResponse
         co2_kg=cf.co2_kg,
         co2_grams=cf.co2_grams,
         timestamp=cf.timestamp,
+        energy_attribution=cf.energy_attribution.value,
+        precision="estimated" if cf.is_estimated else "measured",
     )
 
 

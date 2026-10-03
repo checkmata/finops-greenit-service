@@ -85,28 +85,94 @@ class Settings(BaseSettings):
         description="Baseline cost per GB-month in USD",
     )
 
-    # --- API / Server ---
+    # --- API / Server (used by `python -m app`) ---
+    # V1: API_WORKERS and METRICS_CACHE_TTL_SECONDS were removed — they were
+    # declared but never read. The service must run with ONE worker because the
+    # scheduler lives in the API process (see docs/LIMITATIONS.md).
     API_HOST: str = Field(default="0.0.0.0", description="API bind address")
     API_PORT: int = Field(default=8080, ge=1, le=65535, description="API port")
-    API_WORKERS: int = Field(default=1, ge=1, le=32, description="Number of worker processes")
 
-    # --- Logging ---
+    # --- Logging (wired in app/logging_config.py since V1) ---
     LOG_LEVEL: str = Field(default="INFO", description="Logging level")
     LOG_FORMAT: str = Field(default="json", pattern="^(json|text)$", description="Log format")
 
-    # --- Cache / Performance ---
-    METRICS_CACHE_TTL_SECONDS: int = Field(
-        default=60,
-        ge=1,
-        le=3600,
-        description="TTL for Prometheus query result cache",
-    )
-
     # --- Database (TimescaleDB) ---
+    # V1: no password in the default. Local dev sets it in .env (git-ignored);
+    # Kubernetes/OpenShift injects it from a Secret.
     DATABASE_URL: str = Field(
-        default="postgresql://finops:finops_dev_password@localhost:5432/finops_greenit",
+        default="postgresql://finops@localhost:5432/finops_greenit",
         description="PostgreSQL connection string (TimescaleDB-compatible)",
     )
+
+    # --- Multicluster (V1) ---
+    # Without CLUSTERS_CONFIG_FILE the service observes ONE cluster named
+    # CLUSTER_NAME through PROMETHEUS_URL (MVP behaviour).
+    CLUSTER_NAME: str = Field(default="local", description="Name of the single cluster when no clusters file")
+    CLUSTERS_CONFIG_FILE: str | None = Field(
+        default=None,
+        description="YAML file listing clusters (name, role, prometheus_url). See config/clusters.*.yaml",
+    )
+
+    # --- Scheduler (V1) ---
+    SCHEDULER_ENABLED: bool = Field(default=True, description="Start the snapshot scheduler with the API")
+    SCHEDULER_INTERVAL_SECONDS: int = Field(default=300, ge=10, le=86400)
+    SCHEDULER_NAMESPACES: str = Field(
+        default="",
+        description="Comma-separated explicit namespaces. Empty = discover from Prometheus",
+    )
+    NAMESPACE_INCLUDE_REGEX: str = Field(default=".*", description="Full-match regex applied to discovered namespaces")
+    NAMESPACE_EXCLUDE_REGEX: str = Field(
+        default=r"^(kube-.*|openshift.*|kepler)$",
+        description="Full-match regex of namespaces to skip (platform namespaces)",
+    )
+    MIN_OBSERVATION_HOURS: float = Field(
+        default=24.0, ge=0.0, le=24 * 90,
+        description="Hours of CPU history required before a right-sizing recommendation (7 days advised in prod)",
+    )
+    WORKLOAD_LABEL: str = Field(
+        default="app",
+        description="Pod label identifying a workload (must be allow-listed in kube-state-metrics)",
+    )
+
+    # --- Failover (V2) ---
+    FAILOVER_ENABLED: bool = Field(default=True, description="Run the failover controller (needs >= 2 clusters)")
+    FAILOVER_MODE: str = Field(
+        default="manual", pattern="^(decision_only|manual|auto)$",
+        description="decision_only: record only | manual: human approves via API | auto: execute",
+    )
+    FAILOVER_FAILURE_THRESHOLD_SECONDS: float = Field(default=60, ge=0, description="Primary unhealthy this long → failover")
+    FAILOVER_RECOVERY_THRESHOLD_SECONDS: float = Field(default=120, ge=0, description="Primary healthy this long → failback")
+    FAILOVER_TICK_SECONDS: float = Field(default=10, gt=0, le=3600)
+    # --- V3 ML (app.ml_service) ---
+    ML_ENABLED: bool = Field(default=True, description="Hourly ML cycle (anomaly, forecast, right-sizing) on the leader")
+    ML_INTERVAL_SECONDS: float = Field(default=3600, gt=0)
+    ML_HISTORY_HOURS: float = Field(default=48, gt=0, le=24 * 7, description="History read (retention is 7 days)")
+    ML_ANOMALY_THRESHOLD: float = Field(default=4.0, gt=0, description="Robust z-score threshold")
+    ML_MIN_CONFIDENCE: float = Field(default=0.3, ge=0, le=1, description="Below: no ML right-sizing advice")
+    # --- V4 agent (app.agent_service) ---
+    AGENT_ENABLED: bool = Field(default=True)
+    AGENT_GITOPS_URL: str = Field(default="", description="Gitea base URL, e.g. http://gitea:3000 (empty = actions disabled)")
+    AGENT_GITOPS_REPO: str = Field(default="finops/platform-gitops")
+    AGENT_GITOPS_TOKEN_FILE: str = Field(default="", description="agent's Gitea token (Docker/K8s secret file)")
+    AGENT_APPROVAL_TOKEN_FILE: str = Field(default="", description="human approval token file (empty = approvals disabled)")
+    AGENT_VERIFY_TIMEOUT_SECONDS: int = Field(default=300, gt=0, le=3600)
+    AGENT_ACTIVE_CLUSTERS: str = Field(default="", description="clusters the agent may act on (default: the primary)")
+    DATA_GUARD_PERIOD_SECONDS: float = Field(default=1.0, gt=0, le=60,
+                                             description="V2.x split-brain guard period (fencing of stale DB copies)")
+    FAILOVER_NAMESPACES: str = Field(default="banking,trading,ecommerce", description="Namespaces the actuator may scale")
+    FAILOVER_MAX_REPLICAS: int = Field(default=5, ge=1, le=100)
+    FAILOVER_EXCLUDE_DEPLOYMENTS: str = Field(default="loadgenerator",
+                                              description="Deployments never promoted (not application workloads)")
+
+    # --- High availability (V2) ---
+    LEADER_ELECTION: str = Field(
+        default="auto", pattern="^(auto|postgres|none)$",
+        description="auto: PostgreSQL advisory lock when DATABASE_URL is PostgreSQL, else single process",
+    )
+
+    @property
+    def explicit_namespaces(self) -> list[str]:
+        return [n.strip() for n in self.SCHEDULER_NAMESPACES.split(",") if n.strip()]
 
 
 # Module-level instance for easy import: `from app.config import settings`

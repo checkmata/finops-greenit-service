@@ -17,6 +17,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+# Workload name used when metrics are aggregated at namespace level
+# (no per-workload breakdown). Kept as a constant so adapters, engines and
+# storage agree on it.
+NAMESPACE_AGGREGATE = "*"
+# Workload name for usage that could not be attributed to a labelled workload
+# (pods without the workload label, or pods that no longer exist).
+UNATTRIBUTED_WORKLOAD = "_unattributed"
+
 
 @dataclass(frozen=True)
 class PodMetric:
@@ -49,6 +57,22 @@ class PodMetric:
 
     # --- metadata ---
     timestamp: datetime
+
+    # --- scope (V1 multicluster / per-workload) ---
+    # Defaults keep every MVP call site valid: a PodMetric without these
+    # fields is a namespace aggregate on the default cluster.
+    cluster: str = "default"
+    workload: str = NAMESPACE_AGGREGATE
+
+    # Hours of CPU-usage history behind cpu_core_hours (V1). None = unknown
+    # (MVP call sites / sources that cannot tell). A young workload must not be
+    # right-sized on a few minutes of data.
+    observation_hours: float | None = None
+
+    # V3: POINT-IN-TIME CPU (cores, 5-min rate) next to the long-window average
+    # above. The average is right for V1 right-sizing but smooths away every
+    # spike — anomaly detection and forecasting need the instantaneous value.
+    cpu_cores_now: float | None = None
 
     @property
     def cpu_utilization_pct(self) -> float:
@@ -130,6 +154,10 @@ class StorageMetric:
     capacity_bytes: float
     is_bound: bool
     timestamp: datetime
+    # False when kube-state-metrics knows the PVC but kubelet volume stats are
+    # missing for it. used/capacity are then 0.0 placeholders and MUST NOT be
+    # priced (V1: no invented storage cost).
+    has_usage_stats: bool = True
 
     @property
     def usage_pct(self) -> float:

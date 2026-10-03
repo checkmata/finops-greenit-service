@@ -1,0 +1,12 @@
+# Lets an ApplicationSet use OCM PlacementDecisions as its cluster list
+# (clusterDecisionResource generator) — the documented OCM ↔ Argo CD integration.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ocm-placement-generator
+  namespace: argocd
+data:
+  apiVersion: cluster.open-cluster-management.io/v1beta1
+  kind: placementdecisions
+  statusListKey: decisions
+  matchKey: clusterName

@@ -1,0 +1,10 @@
+# Standby cluster: the failover actuator identity + the authenticated Prometheus proxy.
+# Single source of truth stays in manifests/ (Argo CD builds with
+# --load-restrictor LoadRestrictionsNone, see gitops/bootstrap/argocd).
+# The Secrets these objects reference (token, htpasswd) are NOT in Git:
+# scripts/k8s/make-actuator-secrets.sh and make-prometheus-auth.sh create them.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../../manifests/failover-actuator-rbac.yaml
+  - ../../../../manifests/prometheus-auth-proxy.yaml
