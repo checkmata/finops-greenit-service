@@ -17,12 +17,15 @@ x-api: &api
     FAILOVER_FAILURE_THRESHOLD_SECONDS: ${FAILOVER_FAILURE_THRESHOLD_SECONDS:-60}
     FAILOVER_RECOVERY_THRESHOLD_SECONDS: ${FAILOVER_RECOVERY_THRESHOLD_SECONDS:-120}
     FAILOVER_TICK_SECONDS: ${FAILOVER_TICK_SECONDS:-10}
+    ACTUATOR_TOKEN_TTL_SECONDS: ${ACTUATOR_TOKEN_TTL_SECONDS:-}
     # V4 agent: commits approved actions to the LOCAL GitOps repo with its own identity
     AGENT_GITOPS_URL: http://gitea:3000
     AGENT_GITOPS_TOKEN_FILE: /run/secrets/gitea_agent_token
     AGENT_APPROVAL_TOKEN_FILE: /run/secrets/agent_approval_token
   secrets: [k8s_secondary_token, k8s_secondary_ca, prom_secondary_password, ledger_postgres_password,
-            gitea_agent_token, agent_approval_token]
+            gitea_agent_token, agent_approval_token, k8s_secondary_issuer_token]
+  # V2.x: automatically renewed credentials (written by the leader, read by every replica)
+  volumes: ["actuator-credentials:/var/lib/finops/credentials"]
 
 services:
   api:
@@ -62,6 +65,11 @@ secrets:
     file: ./.secrets/gitea_agent_token         # scripts/gitops/make-agent-identity.sh (V4)
   agent_approval_token:
     file: ./.secrets/agent_approval_token      # human approval token (V4), never in Git
+  k8s_secondary_issuer_token:
+    file: ./.secrets/k8s_secondary_issuer_token  # ONE-TIME bootstrap (scripts/k8s/make-actuator-issuer.sh)
+
+volumes:
+  actuator-credentials:
 
 networks:
   kind:

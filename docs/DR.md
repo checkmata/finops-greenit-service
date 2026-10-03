@@ -102,3 +102,62 @@ Preuves :
 - Ce test n'a pas été rejoué **sans** le correctif : cela aurait détruit les workloads du primary une seconde fois. Le défaut est établi par l'incident du 01/10 lui-même.
 
 **Encore ouvert** (REQUIRES USER ACTION) : le failback des données (`scripts/dr/ledger-failback.sh`). Il resynchronise le registre du primary depuis `secondary` et **efface** son ancienne copie. Volontairement non exécuté.
+
+## 6. Identifiant de l'actionneur : renouvellement automatique (03/10/2026)
+
+**Cause racine (analyse en lecture seule)**
+- L'actionneur utilisait un jeton **TokenRequest statique** (`kubectl create token --duration 24h`).
+  - Il est lié au **nom et à l'UID** du ServiceAccount, et sa durée est fixe.
+  - Il était monté en lecture seule (`/run/secrets`) et **jamais renouvelé** : seul un humain pouvait en réémettre un.
+- Le 01/10, `secondary` était lui aussi indisponible : il n'est revenu `Available` qu'à 01:59:12, car il partage l'hôte saturé en mémoire.
+  - L'application `finops-platform-secondary` a été supprimée puis recréée à 01:59:17.
+  - Le ServiceAccount a été recréé avec un **nouvel UID**. L'API server vérifie cet UID : l'ancien jeton a été refusé (401).
+  - Les journaux Argo CD de ce moment ne sont plus disponibles : l'enchaînement exact est une déduction, cohérente avec les horodatages.
+- Kubernetes v1.31 : TokenRequest est GA (durée minimale 600 s). Les jetons *projetés*, renouvelés par le kubelet, sont réservés aux pods. Or l'actionneur tourne **hors** des clusters (plan de gestion compose) : il ne peut pas en recevoir directement.
+
+**Solution retenue : TokenRequest + identité émettrice dédiée**
+
+| Identité | Droits | Jeton | Renouvellement |
+|---|---|---|---|
+| `finops-credentials/finops-actuator-issuer` (hors GitOps, `scripts/k8s/make-actuator-issuer.sh`) | **uniquement** `create serviceaccounts/token` pour l'actionneur et pour elle-même (vérifié par `can-i` : rien d'autre) | 24 h | elle-même, toutes les heures |
+| `finops-system/finops-failover-actuator` (GitOps, `Delete=false`) | scale uniquement, **aucun** droit sur les jetons | **1 h** | par l'émettrice, à 50 % de sa durée de vie **ou dès un refus (401)** |
+
+- La boucle de renouvellement tourne sur le leader (`app/credential_service.py`). Les jetons sont stockés dans le volume partagé `actuator-credentials` (écriture atomique, 0600) ; l'actionneur relit son fichier à chaque appel.
+- Un SA recréé est récupéré automatiquement : un jeton demandé **par nom** est lié au nouveau SA.
+- L'annotation `argocd.argoproj.io/sync-options: Delete=false` sur le SA, les Roles et les RoleBindings de l'actionneur empêche Argo CD de les supprimer.
+- L'état est exposé dans `/api/failover` (`credentials`), dans `/health/ready` (degraded si l'identifiant n'est pas valide) et dans les métriques `finops_actuator_token_expires_in_seconds` et `finops_actuator_token_renewals`. Jamais les valeurs des jetons.
+
+**Test réel** (`scripts/dr/credential-renewal-test.sh` → [evidence/credential-renewal-test-2026-10-03.log](evidence/credential-renewal-test-2026-10-03.log)) : plateforme en failover (`secondary` actif), jeton actionneur à 600 s (le minimum), 25 min.
+
+| Vérification | Résultat |
+|---|---|
+| actuation continue (probe + get + scale `trading/market-feed` sur le standby, toutes les 20 s) | **69 opérations, 0 échec** |
+| renouvellements automatiques | **6** (à 50 % de la durée de vie), sans aucune action humaine |
+| le **premier jeton, expiré, est refusé** (le renouvellement était nécessaire) | **HTTP 401** à t+654 s ; jeton courant `ok` |
+| SA supprimé volontairement, recréé par Argo CD (nouvel UID) | 401 pendant la récupération, puis **actuation rétablie automatiquement en 24 s** |
+
+**Preuve en conditions réelles** : le failback du 03/10 (§7) a restauré 9 Deployments avec un jeton émis automatiquement.
+
+**Limite restante** : si le plan de gestion reste arrêté **plus de 24 h**, le jeton de l'émettrice expire et il faut relancer `make-actuator-issuer.sh` une fois. C'est signalé (`issuer.state = expired`), mais **aucune alerte n'est branchée**.
+
+## 7. Réconciliation et failback après l'incident (03/10/2026)
+
+**RPO réel de l'incident du 01/10 : 10 150 transactions (~3 min)**, pas 0 :
+- la réplication asynchrone était bloquée pendant l'OOM ;
+- dernière ligne répliquée à 01:49:47 ;
+- le primary a encore accepté des écritures de 01:53:47 à 01:56:44.
+
+Ces lignes n'étaient **pas perdues**, mais une resynchronisation les aurait effacées.
+
+1. **Réconciliation** (`scripts/dr/ledger-reconcile.sh`, dry-run par défaut). Lecture seule sur la copie du primary.
+   - Archive [evidence/ledger-reconciliation-2026-10-01.csv.gz](evidence/ledger-reconciliation-2026-10-01.csv.gz) (sha256 `1dd42e62…`).
+   - Insertion dans `secondary` en **une transaction**, avec de nouveaux ids, `origin='primary-reconciled'` et l'horodatage d'origine.
+   - COMMIT seulement si le compte (10 150) **et** l'empreinte du contenu sont identiques (`b3697b19…`) : **vérifié**.
+2. **Failback** (`scripts/dr/ledger-failback.sh` → [evidence/dr-failback-2026-10-03-after-incident.log](evidence/dr-failback-2026-10-03-after-incident.log)).
+   - Primary reconstruit depuis `secondary` en 67,7 s (~4,97 M lignes).
+   - Bascule sans perte (LSN égaux), 1,1 s d'écritures indisponibles ; primary promu (timeline 9).
+   - `secondary` reconstruit en standby.
+   - Failback des workloads par le contrôleur : **9 restaurés** via l'actionneur et son jeton renouvelé.
+3. **Cohérence** : 4 989 700 lignes, empreinte identique des deux côtés (`6daa0a4c…`).
+   - Contrôle **relancé manuellement** : le script s'est arrêté sur une erreur transitoire masquée à l'étape 9 (exit 2). Corrigé (nouvelles tentatives, erreurs visibles).
+   - Les contrôles d'empreinte se font désormais **par paquets de 100 000 ids**. Une agrégation unique sur ~2,7 M lignes avait fait tuer (OOMKill, limite 256 Mi) les deux bases le 03/10 à 19:36. Elles ont redémarré, sans perte de données ni failover.

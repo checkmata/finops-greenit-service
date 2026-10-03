@@ -5,7 +5,7 @@ Uses pydantic-settings for type-safe, validated configuration loading from
 environment variables with sensible defaults. All settings are centralized here
 to provide a single source of truth and enable testing via dependency injection.
 """
-from pydantic import Field
+from pydantic import field_validator, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -157,6 +157,16 @@ class Settings(BaseSettings):
     AGENT_APPROVAL_TOKEN_FILE: str = Field(default="", description="human approval token file (empty = approvals disabled)")
     AGENT_VERIFY_TIMEOUT_SECONDS: int = Field(default=300, gt=0, le=3600)
     AGENT_ACTIVE_CLUSTERS: str = Field(default="", description="clusters the agent may act on (default: the primary)")
+    # --- V2.x credential renewal (app/credential_service.py) ---
+    CREDENTIAL_RENEWAL_PERIOD_SECONDS: float = Field(default=30, gt=0, le=600)
+    ACTUATOR_TOKEN_TTL_SECONDS: int | None = Field(default=None, ge=600,
+        description="Override of the actuator token lifetime (tests); default from clusters config (1 h)")
+
+    @field_validator("ACTUATOR_TOKEN_TTL_SECONDS", mode="before")
+    @classmethod
+    def _empty_ttl_is_unset(cls, v):
+        # docker compose passes `${VAR:-}` as an empty string when the variable is not set
+        return None if v in ("", None) else v
     DATA_GUARD_PERIOD_SECONDS: float = Field(default=1.0, gt=0, le=60,
                                              description="V2.x split-brain guard period (fencing of stale DB copies)")
     FAILOVER_NAMESPACES: str = Field(default="banking,trading,ecommerce", description="Namespaces the actuator may scale")

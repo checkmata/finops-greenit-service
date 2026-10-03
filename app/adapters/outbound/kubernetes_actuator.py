@@ -27,6 +27,8 @@ class KubernetesActuator(FailoverActuatorPort):
     def __init__(self, access: KubernetesAccess, timeout_seconds: float = 10) -> None:
         self._static_token = access.credentials.secret
         self._token_file = Path(access.token_file) if access.token_file else None
+        # V2.x: automatically renewed token (app/credential_service.py) takes precedence
+        self._renewed_file = Path(access.renewal.actuator_token_file) if access.renewal else None
         self._client = httpx.AsyncClient(
             base_url=access.api_url,
             verify=access.tls.verify,
@@ -35,11 +37,12 @@ class KubernetesActuator(FailoverActuatorPort):
 
     def _headers(self, extra: dict | None = None) -> dict:
         token = self._static_token
-        if self._token_file is not None:
-            try:
-                token = self._token_file.read_text().strip() or token
-            except OSError:
-                pass
+        for f in (self._token_file, self._renewed_file):       # later = higher priority
+            if f is not None:
+                try:
+                    token = f.read_text().strip() or token
+                except OSError:
+                    pass
         return {"Authorization": f"Bearer {token}", **(extra or {})}
 
     async def probe(self, namespace: str) -> str:

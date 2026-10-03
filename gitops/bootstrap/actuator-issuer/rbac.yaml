@@ -1,0 +1,39 @@
+# Credential ISSUER for the failover actuator (applied by scripts/k8s/make-actuator-issuer.sh,
+# deliberately NOT managed by GitOps: a GitOps cascade must never be able to delete the
+# identity that re-issues the actuator's credential — incident 2026-10-01, docs/DR.md §5).
+#
+# Its ONLY right: TokenRequest (create serviceaccounts/token) for exactly two names —
+#   finops-system/finops-failover-actuator   (mint the actuator's 1 h tokens)
+#   finops-credentials/finops-actuator-issuer (renew its own 24 h token)
+# It cannot read Secrets, cannot scale anything, cannot create or bind roles.
+apiVersion: v1
+kind: Namespace
+metadata: {name: finops-credentials}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: finops-actuator-issuer, namespace: finops-credentials}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: finops-actuator-issuer, namespace: finops-system}
+rules:
+  - {apiGroups: [""], resources: [serviceaccounts/token], resourceNames: [finops-failover-actuator], verbs: [create]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: finops-actuator-issuer, namespace: finops-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: finops-actuator-issuer}
+subjects: [{kind: ServiceAccount, name: finops-actuator-issuer, namespace: finops-credentials}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: finops-actuator-issuer-self, namespace: finops-credentials}
+rules:
+  - {apiGroups: [""], resources: [serviceaccounts/token], resourceNames: [finops-actuator-issuer], verbs: [create]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: finops-actuator-issuer-self, namespace: finops-credentials}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: finops-actuator-issuer-self}
+subjects: [{kind: ServiceAccount, name: finops-actuator-issuer, namespace: finops-credentials}]

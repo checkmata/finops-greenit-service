@@ -60,6 +60,8 @@ async def failover_status(request: Request, service=Depends(get_failover_service
         "events": [_event(e) for e in await service.store.list_events(20)],
         # V2.x: can each actuator identity act right now? (read-only probe)
         "actuators": await service.actuator_health(),
+        # V2.x hardening: automatically renewed credentials (never the token values)
+        "credentials": {r.spec.cluster: r.status() for r in (request.app.state.container.credentials or [])},
         # V2.x: live state of each replicated database copy (read-only queries).
         "data": {cluster: {name: {"reachable": st.reachable, "in_recovery": st.in_recovery,
                                   "timeline": st.timeline, "app_login": st.app_login,
