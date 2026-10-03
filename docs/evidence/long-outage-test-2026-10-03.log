@@ -1,0 +1,7 @@
+[15:24:33] == Long-outage test — REAL — primary frozen for 420s
+[15:24:33] before: 4 primary Applications, 33 primary workload objects; decision: primary secondary
+[15:28:59] t+266s OCM marks primary down: Available=Unknown taints=[cluster.open-cluster-management.io/unreachable]
+[15:31:42] t+420s end of outage: decision still [primary secondary], primary Applications unchanged
+[15:31:42] primary unpaused; waiting for OCM to clear the taint
+[15:31:49] PASS — after a 420s outage seen by OCM, primary stayed a target, its Applications and all 33 workload objects are the same objects
+[15:31:49] apps: banking-primary:Synced/Healthy banking-secondary:Synced/Healthy ecommerce-primary:Synced/Healthy ecommerce-secondary:Synced/Healthy finops-platform-primary:Synced/Healthy finops-platform-secondary:Synced/Healthy trading-primary:Synced/Healthy trading-secondary:Synced/Healthy 

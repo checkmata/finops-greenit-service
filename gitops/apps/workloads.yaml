@@ -8,6 +8,10 @@ metadata:
 spec:
   goTemplate: true
   goTemplateOptions: ["missingkey=error"]
+  # INCIDENT 2026-10-01 (docs/DR.md §5): an Application removed by the generator must
+  # NOT take its workloads with it — on a DR platform that destroys the failed site.
+  syncPolicy:
+    preserveResourcesOnDeletion: true
   generators:
     - matrix:
         generators:
@@ -70,6 +74,8 @@ metadata:
 spec:
   goTemplate: true
   goTemplateOptions: ["missingkey=error"]
+  syncPolicy:
+    preserveResourcesOnDeletion: true   # see above (incident 2026-10-01)
   generators:
     - clusterDecisionResource:
         configMapRef: ocm-placement-generator

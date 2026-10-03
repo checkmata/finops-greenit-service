@@ -21,3 +21,12 @@ spec:
         labelSelector:
           matchExpressions:
             - {key: finops.io/role, operator: In, values: [primary, secondary]}
+  # INCIDENT 2026-10-01: during a host OOM, OCM tainted `primary` (unreachable/unavailable,
+  # effect NoSelect) → it left the PlacementDecision → the ApplicationSet deleted its
+  # Applications → Argo CD cascade-deleted every workload of the failed site.
+  # A cluster that is DOWN must stay a target: tolerate both outage taints, with no
+  # tolerationSeconds (= for the whole outage). Removing a cluster is a Git decision
+  # (its finops.io/role label), never a side effect of a failure.
+  tolerations:
+    - {key: cluster.open-cluster-management.io/unreachable, operator: Exists}
+    - {key: cluster.open-cluster-management.io/unavailable, operator: Exists}

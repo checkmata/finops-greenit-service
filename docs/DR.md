@@ -63,3 +63,42 @@ Preuves :
 - **Réplication asynchrone** + fenêtre de split-brain d'environ 1–2 s : RPO strictement nul non garanti.
 - **Hub GitOps sur `secondary`** : la reprise fonctionne quand le *primary* tombe, pas quand c'est le hub.
 - Le failback des données reste une **procédure scriptée déclenchée par un humain**, pas automatique. C'est volontaire : elle efface un volume.
+
+## 5. Incident réel du 01/10/2026 : une panne longue a fait apparaître un défaut GitOps (corrigé)
+
+**Déroulé constaté**
+
+| Heure (UTC) | Événement |
+|---|---|
+| 01:42 | l'hôte manque de mémoire, le noyau tue des processus (`journalctl` : OOM killer) |
+| 01:56:39 | **failover automatique** : registre promu (timeline 8), 9 Deployments scalés sur `secondary` |
+| 01:56:45 | ancien registre du primary **isolé** (rôle applicatif `NOLOGIN`) |
+| 01:59:12–22 | OCM marque le primary indisponible (taint `NoSelect`) → la PlacementDecision ne le contient plus → l'ApplicationSet **supprime les 4 Applications du primary** → Argo CD supprime en cascade leurs workloads (seuls les namespaces résistent : l'identité d'Argo CD n'a pas le droit de les supprimer). `finops-platform-secondary` est aussi supprimée puis recréée : le ServiceAccount de l'actionneur change d'identifiant, son jeton devient invalide (`unauthorized`) |
+| 01/10 → 03/10 | service assuré par `secondary` ; failback **bloqué** par la garde de données (voulu) |
+
+**Ce qui a fonctionné** : détection, hystérésis, promotion des données, isolement de l'ancien primary. **Aucune donnée perdue** : le registre de `secondary` est la copie de référence.
+
+**Ce qui n'allait pas (défaut de conception V2.x)** : la couche GitOps traitait la panne d'un cluster comme son retrait de la flotte, et elle a effacé le site en panne. Les runs DR du 30/09 ne l'avaient pas révélé : `docker pause` ne durait que ~1 min, alors qu'OCM ne déclare un cluster injoignable qu'après ~4–5 min (mesuré : 266 s).
+
+**Correctif** (branche `fix/gitops-preserve-on-outage`)
+- `gitops/apps/workloads.yaml` : `syncPolicy.preserveResourcesOnDeletion: true` sur les deux ApplicationSets. Une Application supprimée ne supprime plus ses workloads.
+- `gitops/bootstrap/ocm/placements.yaml` : tolérances pour `cluster.open-cluster-management.io/unreachable` et `…/unavailable`, **sans** `tolerationSeconds`. Un cluster en panne reste une cible, quelle que soit la durée ; le retirer est une décision Git (son label `finops.io/role`).
+- Jeton de l'actionneur réémis (`scripts/k8s/make-actuator-secrets.sh secondary`, 24 h).
+
+**Remise en service (03/10, constatée)**
+- Dès l'application du correctif, le contrôleur ApplicationSet a **retiré lui-même le verrou de suppression** des Applications qu'il gère. Les 4 Applications du primary bloquées ont donc été finalisées, recréées, puis resynchronisées depuis Git, **y compris `banking-primary`**.
+- Ce n'était **pas anticipé** : l'intention était de garder `banking-primary` en attente.
+- Conséquence vérifiée : PostgreSQL du primary a redémarré sur son ancien volume (`data-ledger-db-0`).
+  - Contenu logique **inchangé** : 2 772 200 lignes, dernière écriture le 01/10 à 01:56:44, **0 ligne écrite depuis**.
+  - La copie reste **isolée** (`app_login=false`) et le failback reste **bloqué** par la garde de données.
+  - Seules les écritures physiques de redémarrage de PostgreSQL ont eu lieu.
+
+**Test de non-régression**
+- Statique : `tests/unit/test_v2x_gitops_outage.py`. Il échoue sans le correctif, passe avec.
+- **Réel** : `scripts/dr/long-outage-test.sh` → [evidence/long-outage-test-2026-10-03.log](evidence/long-outage-test-2026-10-03.log).
+  - Primary gelé 420 s ; OCM le marque `unreachable` à t+266 s.
+  - Pendant toute la panne, `primary` reste dans la décision OCM et ses 4 Applications ne bougent pas.
+  - Après la panne, ses 33 objets de workloads sont **les mêmes objets** (mêmes UID) : **PASS**.
+- Ce test n'a pas été rejoué **sans** le correctif : cela aurait détruit les workloads du primary une seconde fois. Le défaut est établi par l'incident du 01/10 lui-même.
+
+**Encore ouvert** (REQUIRES USER ACTION) : le failback des données (`scripts/dr/ledger-failback.sh`). Il resynchronise le registre du primary depuis `secondary` et **efface** son ancienne copie. Volontairement non exécuté.
