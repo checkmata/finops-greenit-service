@@ -77,6 +77,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("Failover controller started (mode=%s, failure=%ss, recovery=%ss)", settings.FAILOVER_MODE,
                     settings.FAILOVER_FAILURE_THRESHOLD_SECONDS, settings.FAILOVER_RECOVERY_THRESHOLD_SECONDS)
 
+    if container.credentials:
+        from app.credential_service import run_credential_loop
+
+        tasks.append(asyncio.create_task(run_credential_loop(
+            container.credentials, container.leader, settings.CREDENTIAL_RENEWAL_PERIOD_SECONDS)))
+        logger.info("Credential renewal started for %s (period=%ss, leader-gated)",
+                    [r.spec.cluster for r in container.credentials], settings.CREDENTIAL_RENEWAL_PERIOD_SECONDS)
     if container.agent is not None:
         try:
             recovered = await container.agent.recover_interrupted()

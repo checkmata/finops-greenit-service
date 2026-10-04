@@ -28,6 +28,8 @@ from app.domain.models.cluster import ClusterRole
 from app.domain.failover_controller import FailoverPolicy
 from app.failover_service import FailoverService, FailoverSettings, parse_namespaces
 from app.ml_service import MLService, MLSettings
+from app.adapters.outbound.k8s_credentials import FileCredentialStore, KubernetesTokenIssuer
+from app.credential_service import CredentialRenewer, RenewalSpec
 from app.ports.failover_ports import LeaderElectionPort
 from app.ports.storage_port import StoragePort
 
@@ -40,6 +42,7 @@ class Container:
     failover: FailoverService | None = None
     ml: MLService | None = None
     agent: AgentService | None = None
+    credentials: list = None           # CredentialRenewer per cluster with automatic renewal
 
     async def close(self) -> None:
         for port in self.registry.ports().values():
@@ -113,4 +116,23 @@ def build_container(settings: Settings) -> Container:
             co2_kg_per_kwh=settings.PUE_CONSTANT * settings.GRID_CARBON_INTENSITY_GCO2_PER_KWH / 1000,
             approval_token_file=settings.AGENT_APPROVAL_TOKEN_FILE or None,
             verify_timeout_seconds=settings.AGENT_VERIFY_TIMEOUT_SECONDS)
-    return Container(registry=registry, storage=storage, leader=leader, failover=failover, ml=ml, agent=agent)
+    renewers = []
+    if failover is not None:
+        for c in clusters:
+            k = c.kubernetes
+            if k is None or k.renewal is None or c.name not in failover.actuators:
+                continue
+            r = k.renewal
+            renewers.append(CredentialRenewer(
+                RenewalSpec(cluster=c.name, actuator_namespace=r.actuator_namespace,
+                            actuator_service_account=r.actuator_service_account,
+                            actuator_ttl_seconds=settings.ACTUATOR_TOKEN_TTL_SECONDS or r.actuator_ttl_seconds,
+                            issuer_namespace=r.issuer_namespace, issuer_service_account=r.issuer_service_account,
+                            issuer_ttl_seconds=r.issuer_ttl_seconds,
+                            issuer_renew_every_seconds=r.issuer_renew_every_seconds,
+                            issuer_bootstrap_file=r.issuer_bootstrap_file,
+                            probe_namespace=sorted(failover.settings.namespaces)[0]),
+                KubernetesTokenIssuer(k.api_url, verify=k.tls.verify), FileCredentialStore(r.store_dir),
+                failover.actuators[c.name]))
+    return Container(registry=registry, storage=storage, leader=leader, failover=failover, ml=ml, agent=agent,
+                     credentials=renewers)

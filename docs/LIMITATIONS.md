@@ -75,7 +75,7 @@ Ce qui reste **non vérifié** :
 | Limite | Statut |
 |---|---|
 | Tous les composants (2 clusters, hub GitOps, Gitea, plan de gestion) sur **un seul hôte physique** | PARTIAL : le DR est prouvé pour la panne d'un cluster, pas pour celle de l'hôte |
-| Réplication PostgreSQL **asynchrone** | MEASURED : retard ≤ 0,08 s ; RPO nul non garanti |
+| Réplication PostgreSQL **asynchrone** | MEASURED : retard ≤ 0,08 s en temps normal, mais **~3 min / 10 150 lignes lors de l'OOM réel du 01/10** ; RPO nul non garanti |
 | **Perte possible d'écritures** acquittées par l'ancien primary avant son isolement | MEASURED : ~100 lignes, isolement ≤ 1,7 s |
 | TimescaleDB du service **non répliqué** | BLOCKED dans ce périmètre |
 | Carnet d'ordres Trading **non répliqué** (mémoire) ; paniers e-commerce (`emptyDir`) | PARTIAL : seuls les manifests sont répliqués |
@@ -86,10 +86,12 @@ Ce qui reste **non vérifié** :
 | Prévision : le modèle choisi sur la validation fait **pire que naive** sur 10/38 séries | MEASURED |
 | Anomalies réelles : précision **non mesurable** sans étiquettes (41 épisodes, 4 liés à une opération) | PARTIAL |
 | Monitoring (Helm) pas encore géré par Argo CD | PARTIAL |
+| Bases du registre limitées à 256 Mi : une requête d'agrégation sur des millions de lignes les fait tuer (OOMKill) | PARTIAL : contrôles par paquets ; la limite n'a pas été relevée |
+| Les conteneurs de l'API tournent en root (`id -u` = 0), malgré l'utilisateur `finops` créé dans l'image | à corriger (hors de ce périmètre) |
 | **Panne longue d'un cluster et GitOps** : jusqu'au 03/10, une panne de plus de ~4 min retirait le cluster de la décision OCM, et Argo CD supprimait ses workloads (incident réel du 01/10, [DR §5](DR.md)) | corrigé (`preserveResourcesOnDeletion` + tolérances OCM) ; **VALIDATED** par une panne réelle de 420 s ; non rejoué sans le correctif |
 | Hôte saturé en mémoire : l'OOM killer a provoqué un failover réel non planifié le 01/10 | PARTIAL : l'hôte n'a que ~300 Mo libres ; aucune alerte branchée |
-| Jeton de l'actionneur à 24 h (réémis le 03/10, expire le 04/10 15:23 UTC) et invalidé si son ServiceAccount est recréé | PARTIAL : `probe()` le signale (`unauthorized`) mais rien n'alerte ; à renouveler, ou à remplacer par un jeton projeté |
-| Retour vers le primary du registre après l'incident du 01/10 non effectué : le service tourne sur `secondary` | REQUIRES USER ACTION (`scripts/dr/ledger-failback.sh`, efface l'ancienne copie du primary) |
+| Identifiant de l'actionneur | **corrigé** (DR §6) : jeton de 1 h renouvelé automatiquement par TokenRequest via une identité émettrice dédiée ; SA recréé récupéré en 24 s ; **VALIDATED** en réel. Reste PARTIAL : si le plan de gestion est arrêté plus de 24 h, il faut relancer une fois `make-actuator-issuer.sh`, et aucune alerte n'est branchée |
+| Retour vers le primary après l'incident du 01/10 | **fait le 03/10** (DR §7) : 10 150 transactions réconciliées puis failback contrôlé ; **RPO réel de l'incident = 10 150 lignes (~3 min)**, rattrapées par réconciliation (pas récupérables par la seule réplication asynchrone) |
 
 ## 2 quater. Sécurité du dépôt (audit du 30/09/2026)
 

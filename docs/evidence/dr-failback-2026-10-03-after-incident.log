@@ -1,0 +1,14 @@
+[22:59:54] == Controlled failback (data first, then workloads) — REAL
+[22:59:54] 0. PRECONDITIONS active=secondary | primary ledger recovery=f login=f timeline=7 | secondary recovery=f timeline=8
+75caa15 ledger failback 1/2: primary ledger resyncs from secondary (generation 4)
+[22:59:55] 1. Git: primary ledger → standby of secondary (generation 4); waiting for Argo CD + base backup
+[23:01:02] 2. primary ledger rebuilt and STREAMING from secondary (t+67.7s); rows: 4974900
+[23:01:02] 3. QUIESCE secondary writes (app role NOLOGIN); last secondary LSN 0/8B001160
+[23:01:03] 4. primary replayed up to 0/8B001160 (zero data loss switchover)
+[23:01:03] 5. primary ledger PROMOTED (timeline 9), app role re-enabled — write unavailability 1.1s
+[23:01:07]    banking writes accepted again on the primary (t+73.9s)
+ff290fe ledger failback 2/2: primary is primary again, secondary resyncs as standby (generation 5)
+[23:01:08] 6. Git: primary role=primary, secondary → standby (generation 5)
+[23:02:20] 7. secondary ledger rebuilt and STREAMING from primary (t+146.9s)
+[23:02:21] 8. WORKLOAD FAILBACK by the controller: failback executed restored=9 at 2026-10-03T23:02:07.585174+00:00 (t+147.1s)
+[23:04:02] 9. CONSISTENCY (re-run MANUALLY after the script stopped on a transient, hidden step-9 error, exit 2): rows<2026-10-03 23:03:10Z primary: 4989700 rows 6daa0a4c6cc2… | secondary: 4989700 rows 6daa0a4c6cc2… → PASS

@@ -28,8 +28,21 @@ clusters:
     # (manifests/failover-actuator-rbac.yaml, scripts/k8s/make-actuator-secrets.sh)
     kubernetes:
       api_url: https://secondary-control-plane:6443
-      token_file: /run/secrets/k8s_secondary_token
+      token_file: /run/secrets/k8s_secondary_token   # legacy static token: bootstrap fallback only
       ca_file: /run/secrets/k8s_secondary_ca
+      # V2.x hardening (docs/DR.md §6): the actuator credential is RENEWED AUTOMATICALLY
+      # (TokenRequest). The issuer, bootstrapped once by scripts/k8s/make-actuator-issuer.sh,
+      # renews itself every hour (24 h tokens) and re-issues the actuator's 1 h token at
+      # 50 % of its lifetime or as soon as it is rejected (e.g. ServiceAccount recreated).
+      renewal:
+        store_dir: /var/lib/finops/credentials        # writable volume shared by the replicas
+        actuator: {namespace: finops-system, service_account: finops-failover-actuator, ttl_seconds: 3600}
+        issuer:
+          namespace: finops-credentials
+          service_account: finops-actuator-issuer
+          ttl_seconds: 86400
+          renew_every_seconds: 3600
+          bootstrap_token_file: /run/secrets/k8s_secondary_issuer_token
     # V2.x: replicated banking ledger (workloads/banking/k8s/base/ledger-db.yaml).
     # Superuser password = Docker secret (scripts/dr/make-ledger-secrets.sh).
     data_services:

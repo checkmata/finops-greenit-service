@@ -77,9 +77,16 @@ log "8. WORKLOAD FAILBACK by the controller: $EV (t+$(el "$T0")s)"
 
 sleep 5
 CUT=$(sqlp primary "SELECT now() - interval '3 seconds'")
-QC="SELECT count(*)||' '||md5(string_agg(id||':'||origin||':'||amount, ',' ORDER BY id)) FROM ledger WHERE created_at < '$CUT'"
+# Bucketed checksum (100 000 ids per bucket): a single string_agg over millions of rows
+# OOM-killed both ledgers (256 Mi limit) on 2026-10-03.
+QC="SELECT sum(n)||' '||md5(string_agg(h, '' ORDER BY b)) FROM (SELECT id/100000 AS b, count(*) AS n, md5(string_agg(id||':'||origin||':'||amount, ',' ORDER BY id)) AS h FROM ledger WHERE created_at < '$CUT' GROUP BY 1) x"
 sleep 3
-H1=$(sqlp primary "$QC"); H2=$(sqlp secondary "$QC")
+# retried, errors visible (2026-10-03: a transient error here stopped the script silently)
+for _ in 1 2 3 4 5; do
+  H1=$(kubectl --context kind-primary -n banking exec ledger-db-0 -- psql -U postgres -d ledger -Atc "$QC") && \
+  H2=$(kubectl --context kind-secondary -n banking exec ledger-db-0 -- psql -U postgres -d ledger -Atc "$QC") && break
+  log "   consistency query failed, retrying in 10 s"; sleep 10
+done
 log "9. CONSISTENCY rows<$CUT primary: ${H1%% *} rows ${H1##* } | secondary: ${H2%% *} rows ${H2##* } → $([ "$H1" = "$H2" ] && echo PASS || echo FAIL)"
 log "   replication: $(sqlp primary "SELECT state||' '||sync_state||' replay_lag='||coalesce(replay_lag::text,'0') FROM pg_stat_replication")"
 log "   standby deployments: $(for ns in banking ecommerce trading; do kubectl --context kind-secondary -n $ns get deploy --no-headers -o custom-columns=N:.metadata.name,R:.spec.replicas | tr -s ' ' | sed "s#^#$ns/#" | tr '\n' ','; done)"

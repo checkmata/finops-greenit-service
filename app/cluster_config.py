@@ -87,6 +87,50 @@ class KubernetesAccess:
     # V2.x: kept so the actuator re-reads a ROTATED short-lived token without restart
     # (found in the real DR run: a 24 h token expired → 401 during the failover).
     token_file: str | None = None
+    # V2.x hardening (docs/DR.md §6): automatic TokenRequest renewal. When set, the actuator
+    # reads `renewal.store_dir/actuator.token` first (written by app/credential_service.py).
+    renewal: "RenewalConfig | None" = None
+
+
+@dataclass(frozen=True)
+class RenewalConfig:
+    store_dir: str
+    actuator_namespace: str = "finops-system"
+    actuator_service_account: str = "finops-failover-actuator"
+    actuator_ttl_seconds: int = 3600
+    issuer_namespace: str = "finops-credentials"
+    issuer_service_account: str = "finops-actuator-issuer"
+    issuer_ttl_seconds: int = 86400
+    issuer_renew_every_seconds: int = 3600
+    issuer_bootstrap_file: str | None = None
+
+    @property
+    def actuator_token_file(self) -> str:
+        return f"{self.store_dir.rstrip('/')}/actuator.token"
+
+
+def _renewal(spec: dict | None, where: str) -> RenewalConfig | None:
+    if not spec:
+        return None
+    if any(k in spec for k in ("token", "issuer_token")):
+        raise ClusterConfigError(f"{where}: inline tokens are forbidden — use issuer_bootstrap_file")
+    try:
+        a, i = spec.get("actuator", {}), spec.get("issuer", {})
+        cfg = RenewalConfig(
+            store_dir=str(spec["store_dir"]),
+            actuator_namespace=a.get("namespace", "finops-system"),
+            actuator_service_account=a.get("service_account", "finops-failover-actuator"),
+            actuator_ttl_seconds=int(a.get("ttl_seconds", 3600)),
+            issuer_namespace=i.get("namespace", "finops-credentials"),
+            issuer_service_account=i.get("service_account", "finops-actuator-issuer"),
+            issuer_ttl_seconds=int(i.get("ttl_seconds", 86400)),
+            issuer_renew_every_seconds=int(i.get("renew_every_seconds", 3600)),
+            issuer_bootstrap_file=i.get("bootstrap_token_file"))
+    except (KeyError, ValueError, TypeError) as exc:
+        raise ClusterConfigError(f"{where}: invalid renewal block: {exc}") from exc
+    if not 600 <= cfg.actuator_ttl_seconds <= cfg.issuer_ttl_seconds:
+        raise ClusterConfigError(f"{where}: need 600 ≤ actuator ttl ≤ issuer ttl (TokenRequest minimum is 600 s)")
+    return cfg
 
 
 @dataclass(frozen=True)
@@ -214,12 +258,17 @@ def parse_clusters(data: dict) -> list[ClusterConfig]:
         k8s = None
         if item.get("kubernetes"):
             kspec = item["kubernetes"]
+            renewal = _renewal(kspec.get("renewal"), f"{where}.kubernetes.renewal")
+            has_static = any(k.startswith("token") for k in kspec)
             k8s = KubernetesAccess(
                 api_url=_expand(str(kspec["api_url"])),
-                credentials=_credentials({"type": "bearer", **{k: v for k, v in kspec.items()
-                                                               if k.startswith("token")}}, f"{where}.kubernetes"),
+                # with automatic renewal a static token is optional (bootstrap/fallback only)
+                credentials=(_credentials({"type": "bearer", **{k: v for k, v in kspec.items()
+                                                                if k.startswith("token")}}, f"{where}.kubernetes")
+                             if has_static or renewal is None else Credentials("bearer", None, "")),
                 tls=_tls(kspec),
                 token_file=kspec.get("token_file"),
+                renewal=renewal,
             )
         out.append(ClusterConfig(
             name=name, role=role, prometheus_url=url,

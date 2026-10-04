@@ -89,9 +89,13 @@ async def health_check(
     prometheus, database = await asyncio.gather(
         check_prometheus_health(registry), check_database_health(storage)
     )
+    container = getattr(request.app.state, "container", None)
+    creds = {r.spec.cluster: r.status()["actuator"] for r in (getattr(container, "credentials", None) or [])}
+    creds_ok = all(c["state"] == "valid" for c in creds.values())
     if database["status"] != "healthy" or prometheus["status"] == "unhealthy":
         overall = "unhealthy"
-    elif prometheus["status"] == "degraded":
+    elif prometheus["status"] == "degraded" or not creds_ok:
+        # an actuator without a valid credential cannot fail over: degraded, not unready
         overall = "degraded"
     else:
         overall = "healthy"
@@ -99,7 +103,8 @@ async def health_check(
         "status": overall,
         "timestamp": time.time(),
         "elapsed_ms": round((time.time() - start) * 1000, 2),
-        "components": {"prometheus": prometheus, "database": database},
+        "components": {"prometheus": prometheus, "database": database,
+                       **({"actuator_credentials": creds} if creds else {})},
     }
     # V2 HA: which replica writes. A follower is fully READY (it serves the API);
     # it just does not run the scheduler/failover loop.

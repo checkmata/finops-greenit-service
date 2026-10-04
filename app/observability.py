@@ -34,3 +34,13 @@ SCHEDULER_SKIPPED_NOT_LEADER = Counter(
 IS_LEADER = Gauge("finops_is_leader", "1 if this replica holds the scheduler/failover leadership")
 FAILOVER_ACTIVE_CLUSTER = Gauge("finops_failover_active", "1 for the cluster the controller considers active",
                                 ["cluster"])
+
+# V2.x: automatic credential renewal of the failover actuator (app/credential_service.py)
+ACTUATOR_TOKEN_EXPIRES_IN = Gauge(
+    "finops_actuator_token_expires_in_seconds",
+    "Seconds before the failover actuator credential expires (alert if it approaches 0)",
+    ["cluster", "identity"],
+)
+ACTUATOR_TOKEN_RENEWALS = Gauge(
+    "finops_actuator_token_renewals", "Automatic renewals since process start", ["cluster", "identity"],
+)

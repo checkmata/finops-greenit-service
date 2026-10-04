@@ -61,4 +61,4 @@ patches:
                 env:
                   - {name: LEDGER_ROLE, value: primary}
                   - {name: LEDGER_SOURCE_HOST, value: secondary-control-plane}
-                  - {name: LEDGER_RESYNC_GENERATION, value: "3"}
+                  - {name: LEDGER_RESYNC_GENERATION, value: "4"}
